@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BEESDR ESP32-C6 WiFi TX Control</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232d; --line:#2a3441;
+    --txt:#e6edf3; --dim:#8b98a5; --accent:#3fb950; --accent2:#2f81f7;
+    --warn:#d29922; --err:#f85149; --chip:#21262d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{position:sticky;top:0;z-index:5;background:linear-gradient(180deg,#0e1116,#0e1116ee);
+    border-bottom:1px solid var(--line);padding:14px 20px;display:flex;
+    align-items:center;gap:12px;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.2px}
+  .spacer{flex:1}
+  .pill{background:var(--chip);border:1px solid var(--line);border-radius:999px;
+    padding:4px 10px;font-size:12px;color:var(--dim)}
+  .pill b{color:var(--txt)}
+  .btn{background:var(--panel2);border:1px solid var(--line);color:var(--txt);
+    border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer;transition:.12s}
+  .btn:hover{border-color:#3d4a5a;background:#232c38}
+  .btn.primary{background:#1f6feb22;border-color:#2f81f7;color:#cfe1ff}
+  .btn.danger{background:#f8514922;border-color:#f85149;color:#ffd1cd}
+  .btn.small{padding:5px 10px;font-size:12px}
+  #banner{display:none;margin:0;padding:9px 20px;background:#f8514922;
+    border-bottom:1px solid var(--err);color:#ffd1cd;font-size:13px}
+  main{padding:20px;display:grid;gap:18px;
+    grid-template-columns:repeat(auto-fill,minmax(340px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:16px;display:flex;flex-direction:column;gap:14px}
+  .card.unknown{border-style:dashed;opacity:.9}
+  .chead{display:flex;align-items:center;gap:10px}
+  .dot{width:11px;height:11px;border-radius:50%;flex:none}
+  .dot.on{background:var(--accent);box-shadow:0 0 9px var(--accent)}
+  .dot.idle{background:var(--warn)}
+  .dot.off{background:#5b6774}
+  .chead .id{font-weight:600;font-size:14px}
+  .chead .port{color:var(--dim);font-size:11px;font-family:ui-monospace,Menlo,monospace}
+  .freq{margin-left:auto;text-align:right}
+  .freq .big{font-size:20px;font-weight:700}
+  .freq .lbl{font-size:11px;color:var(--dim)}
+  .section-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.6px;
+    color:var(--dim);margin-bottom:7px;display:flex;justify-content:space-between}
+  .chan-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+  .chan{position:relative;border:1px solid var(--line);background:var(--panel2);
+    color:var(--txt);border-radius:8px;padding:9px 0;text-align:center;cursor:pointer;
+    font-size:13px;font-weight:600;transition:.1s}
+  .chan:hover{border-color:#3d4a5a}
+  .chan.sel{background:var(--accent2);border-color:var(--accent2);color:#fff;
+    box-shadow:0 0 10px #2f81f766}
+  .chan.nonoverlap::after{content:"";position:absolute;top:4px;right:4px;
+    width:5px;height:5px;border-radius:50%;background:var(--accent)}
+  .chan.restricted{opacity:.5}
+  .slider-row{display:flex;align-items:center;gap:10px}
+  .slider-row input[type=range]{flex:1;accent-color:var(--accent2)}
+  .slider-row .val{min-width:64px;text-align:right;font-variant-numeric:tabular-nums;
+    font-weight:600}
+  select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
+    border-radius:8px;padding:6px 8px;font-size:13px;width:100%}
+  .row{display:flex;gap:10px;align-items:flex-end}
+  .txtoggle{font-weight:700;padding:10px 14px;white-space:nowrap}
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;font-size:12px;
+    border-top:1px solid var(--line);padding-top:12px}
+  .stats div{display:flex;justify-content:space-between}
+  .stats .k{color:var(--dim)}
+  .stats .v{font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace}
+  .warnbox{background:#d2992218;border:1px solid var(--warn);color:#f5d99a;
+    border-radius:8px;padding:10px;font-size:12.5px;line-height:1.5}
+  code{background:#0b0e13;border:1px solid var(--line);border-radius:5px;padding:1px 5px;
+    font-family:ui-monospace,Menlo,monospace;font-size:12px}
+  .empty{color:var(--dim);text-align:center;padding:60px 20px;grid-column:1/-1}
+  .legend{font-size:11px;color:var(--dim)}
+  .legend .d{display:inline-block;width:6px;height:6px;border-radius:50%;
+    background:var(--accent);margin-right:5px;vertical-align:middle}
+</style>
+</head>
+<body>
+<header>
+  <h1>🐝 BEESDR ESP32-C6 <span style="color:var(--dim);font-weight:400">WiFi TX Control</span></h1>
+  <span class="pill">devices <b id="devcount">0</b></span>
+  <span class="pill" id="clock">—</span>
+  <div class="spacer"></div>
+  <button class="btn small" onclick="autoPlan()" title="Assign channels 1,6,11 across the boards">Auto 1 / 6 / 11</button>
+  <button class="btn small primary" onclick="allTx(true)">Start all</button>
+  <button class="btn small danger" onclick="allTx(false)">Stop all</button>
+</header>
+<div id="banner"></div>
+<main id="cards"><div class="empty" id="empty">Looking for boards…</div></main>
+
+<script>
+const CHANNELS = [1,2,3,4,5,6,7,8,9,10,11,12,13];
+const NONOVERLAP = new Set([1,6,11]);
+const RESTRICTED = new Set([12,13,14]);
+const RATES = ["1m","2m","5m","11m","6m","9m","12m","18m","24m","36m","48m","54m",
+               "mcs0","mcs1","mcs2","mcs3","mcs4","mcs5","mcs6","mcs7"];
+const cards = {};            // port -> {el, kind, update(d)}
+const edited = {};           // "port/field" -> timestamp, to avoid clobbering edits
+
+function markEdit(port,f){ edited[port+"/"+f]=Date.now(); }
+function busy(port,f,inp){
+  return document.activeElement===inp || (Date.now()-(edited[port+"/"+f]||0))<2500;
+}
+function fmt(n){ return n==null?"—":n.toLocaleString(); }
+function freqOf(c){ return c===14?2484:2407+c*5; }
+
+async function api(path, body){
+  const opt = body ? {method:"POST",headers:{"Content-Type":"application/json"},
+                      body:JSON.stringify(body)} : {};
+  const r = await fetch(path, opt);
+  if(!r.ok) throw new Error(path+" -> "+r.status);
+  return r.json();
+}
+function setBanner(msg){
+  const b=document.getElementById("banner");
+  if(msg){b.textContent=msg;b.style.display="block";} else b.style.display="none";
+}
+async function set(port, body){
+  for(const k of Object.keys(body)) markEdit(port,k);
+  try{ await api("/api/set", Object.assign({port}, body)); refresh(); }
+  catch(e){ setBanner("Command failed: "+e.message); }
+}
+async function allTx(on){ try{ await api("/api/all",{tx:on}); refresh(); }catch(e){ setBanner(e.message);} }
+async function autoPlan(){
+  const ours=lastState.filter(d=>d.is_ours), plan=[1,6,11];
+  for(let i=0;i<ours.length;i++) await set(ours[i].port,{ch:plan[i%3]});
+}
+
+// ---- build an editable device card once; return refs + update() ----
+function buildOurs(d){
+  const el=document.createElement("div");
+  el.className="card";
+  el.innerHTML=`
+    <div class="chead">
+      <span class="dot"></span>
+      <div><div class="id"></div><div class="port"></div></div>
+      <div class="freq"><div class="big"></div><div class="lbl"></div></div>
+    </div>
+    <div>
+      <div class="section-lbl"><span>2.4 GHz channel</span>
+        <span class="legend"><span class="d"></span>non-overlapping</span></div>
+      <div class="chan-grid"></div>
+    </div>
+    <div>
+      <div class="section-lbl"><span>Duty cycle</span></div>
+      <div class="slider-row">
+        <input type="range" min="0" max="100" class="s-duty">
+        <span class="val v-duty"></span>
+      </div>
+    </div>
+    <div>
+      <div class="section-lbl"><span>TX power</span></div>
+      <div class="slider-row">
+        <input type="range" min="2" max="20" class="s-pwr">
+        <span class="val v-pwr"></span>
+      </div>
+    </div>
+    <div class="row">
+      <div style="flex:1">
+        <div class="section-lbl"><span>PHY rate</span></div>
+        <select class="s-rate">
+          ${RATES.map(r=>`<option value="${r}">${r}${r==='6m'?' — 20 MHz OFDM':''}</option>`).join("")}
+        </select>
+      </div>
+      <button class="btn txtoggle s-tx"></button>
+    </div>
+    <div class="stats">
+      <div><span class="k">throughput</span><span class="v v-fps"></span></div>
+      <div><span class="k">frames sent</span><span class="v v-ok"></span></div>
+      <div><span class="k">errors</span><span class="v v-err"></span></div>
+      <div><span class="k">backpressure</span><span class="v v-bp"></span></div>
+      <div><span class="k">SSID</span><span class="v v-ssid"></span></div>
+      <div><span class="k">last seen</span><span class="v v-age"></span></div>
+    </div>`;
+
+  const q=s=>el.querySelector(s);
+  const dot=q(".dot"), id=q(".id"), port=q(".port"),
+        big=q(".freq .big"), lbl=q(".freq .lbl"), grid=q(".chan-grid"),
+        sDuty=q(".s-duty"), vDuty=q(".v-duty"), sPwr=q(".s-pwr"), vPwr=q(".v-pwr"),
+        sRate=q(".s-rate"), sTx=q(".s-tx"),
+        vFps=q(".v-fps"), vOk=q(".v-ok"), vErr=q(".v-err"), vBp=q(".v-bp"),
+        vSsid=q(".v-ssid"), vAge=q(".v-age");
+  const p=d.port;
+
+  // channel buttons (built once)
+  const chanEls={};
+  CHANNELS.forEach(c=>{
+    const b=document.createElement("div");
+    b.className="chan"+(NONOVERLAP.has(c)?" nonoverlap":"")+(RESTRICTED.has(c)?" restricted":"");
+    b.textContent=c; b.title=freqOf(c)+" MHz"+(RESTRICTED.has(c)?" (region-restricted)":"");
+    b.onclick=()=>set(p,{ch:c});
+    grid.appendChild(b); chanEls[c]=b;
+  });
+  // live control handlers
+  sDuty.oninput=()=>{markEdit(p,"duty"); vDuty.textContent=sDuty.value+" %";};
+  sDuty.onchange=()=>set(p,{duty:+sDuty.value});
+  sPwr.oninput=()=>{markEdit(p,"pwr"); vPwr.textContent=sPwr.value+" dBm";};
+  sPwr.onchange=()=>set(p,{pwr:+sPwr.value});
+  sRate.onchange=()=>set(p,{rate:sRate.value});
+  sTx.onclick=()=>set(p,{tx:(sTx.dataset.on!=="1")});
+
+  function update(d){
+    const on=d.tx==="on", live=on&&d.fps>0;
+    el.style.borderLeft = d.color ? ("4px solid "+d.color) : "";
+    dot.className="dot "+(!on?"off":(live?"on":"idle"));
+    id.textContent=d.mac||"ESP32-C6";
+    port.textContent=d.port;
+    big.innerHTML=(d.freq?d.freq+'<span style="font-size:12px;color:var(--dim)"> MHz</span>':'—');
+    lbl.textContent="channel "+(d.ch||"—");
+    CHANNELS.forEach(c=>chanEls[c].classList.toggle("sel", c===d.ch));
+    if(!busy(p,"duty",sDuty)){ sDuty.value=d.duty; vDuty.textContent=d.duty+" %"; }
+    if(!busy(p,"pwr",sPwr)){ sPwr.value=d.pwr; vPwr.textContent=d.pwr+" dBm"; }
+    if(!busy(p,"rate",sRate) && d.rate){ sRate.value=d.rate; }
+    sTx.textContent=on?"STOP TX":"START TX";
+    sTx.className="btn txtoggle "+(on?"danger":"primary");
+    sTx.dataset.on=on?"1":"0";
+    vFps.textContent=d.fps+" fps"; vOk.textContent=fmt(d.frames_ok);
+    vErr.textContent=fmt(d.frames_err); vBp.textContent=fmt(d.bp);
+    vSsid.textContent=d.ssid||"—"; vAge.textContent=d.age!=null?d.age+"s":"—";
+  }
+  update(d);
+  return {el, kind:"ours", update};
+}
+
+function buildUnknown(d){
+  const el=document.createElement("div");
+  el.className="card unknown";
+  el.innerHTML=`<div class="chead"><span class="dot off"></span>
+      <span class="id">Unknown serial device</span></div>
+    <div class="warnbox"><b>No status reply</b> from <code>${d.port}</code>.<br><br>
+      • <b>New board?</b> Flash it: <code>tools/flash.sh ${d.port}</code><br>
+      • <b>Was it working?</b> It likely lost power or crashed — unplug/replug it. If a board drops when others transmit, use a <b>powered USB hub</b> or lower TX power.</div>`;
+  return {el, kind:"unknown", update(){}};
+}
+
+let lastState=[];
+function reconcile(state){
+  lastState=state;
+  const wrap=document.getElementById("cards");
+  const empty=document.getElementById("empty");
+  document.getElementById("devcount").textContent=state.length;
+  empty.style.display = state.length? "none":"block";
+  const seen=new Set();
+  for(const d of state){
+    seen.add(d.port);
+    const kind=d.is_ours?"ours":"unknown";
+    let c=cards[d.port];
+    if(c && c.kind!==kind){ c.el.remove(); c=null; }
+    if(!c){ c=d.is_ours?buildOurs(d):buildUnknown(d); cards[d.port]=c; wrap.appendChild(c.el); }
+    c.update(d);
+  }
+  for(const port in cards){ if(!seen.has(port)){ cards[port].el.remove(); delete cards[port]; } }
+}
+
+async function refresh(){
+  try{
+    const j=await api("/api/devices");
+    setBanner("");
+    document.getElementById("clock").textContent=new Date(j.time*1000).toLocaleTimeString();
+    reconcile(j.devices);
+  }catch(e){
+    setBanner("Dashboard server unreachable — is serve.py still running? ("+e.message+")");
+  }
+}
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>

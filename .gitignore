@@ -1,0 +1,12 @@
+# --- ESP-IDF firmware build products (firmware/) ---
+# IDF regenerates build/ from source in ~30 s, and sdkconfig is derived from
+# sdkconfig.defaults (which IS tracked). Never track machine-generated,
+# per-toolchain build output.
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock
+
+# macOS
+.DS_Store

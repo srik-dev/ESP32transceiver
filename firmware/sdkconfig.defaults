@@ -1,0 +1,26 @@
+# --- Target ---
+CONFIG_IDF_TARGET="esp32c6"
+
+# --- Console transport ---
+# The connected C6 board reaches the host through a WCH CH343 USB-UART bridge
+# (VID 0x1a86 / PID 0x55d3), NOT the chip's native USB-Serial-JTAG. So route the
+# log AND the interactive command REPL over UART0, which is what the bridge is
+# wired to. idf.py monitor and tools/esp32c6_ctl.py then talk to the same
+# /dev/cu.usbmodem* port.
+#
+# For a board that exposes the native USB-Serial-JTAG port instead (e.g. an
+# official ESP32-C6-DevKitC-1 plugged into its "USB" jack, VID 0x303a), comment
+# the UART line and set CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y — the REPL code in
+# beacon_tx.c follows this choice automatically.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# --- Tick at 1 kHz so the TX task's once-per-window yield is a 1 ms gap, not
+# a 10 ms one — keeps duty=100 effectively continuous. ---
+CONFIG_FREERTOS_HZ=1000
+
+# --- WiFi: bump the static TX buffers a little; injection is bursty. ---
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
+
+# --- Give the task WDT plenty of margin; the TX loop is deliberately hot. ---
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10

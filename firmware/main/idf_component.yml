@@ -1,0 +1,4 @@
+## Managed dependencies for the BEESDR ESP32-C6 firmware.
+dependencies:
+  ## Addressable RGB status LED (WS2812 on GPIO8) — per-board colour tag.
+  espressif/led_strip: ">=2.4.0,<3.0.0"
