@@ -74,6 +74,13 @@
   code{background:#0b0e13;border:1px solid var(--line);border-radius:5px;padding:1px 5px;
     font-family:ui-monospace,Menlo,monospace;font-size:12px}
   .empty{color:var(--dim);text-align:center;padding:60px 20px;grid-column:1/-1}
+  .phy{font-size:11px;font-weight:700;letter-spacing:.3px;border-radius:6px;
+    padding:2px 7px;border:1px solid;white-space:nowrap}
+  .phy-b {color:#f0b37e;border-color:#f0b37e66;background:#f0b37e18}
+  .phy-g {color:#7ee787;border-color:#7ee78766;background:#7ee78718}
+  .phy-n {color:#79c0ff;border-color:#79c0ff66;background:#79c0ff18}
+  .phy-ax{color:#d2a8ff;border-color:#d2a8ff66;background:#d2a8ff18}
+  .phy-err{color:var(--err);font-size:11px}
   .legend{font-size:11px;color:var(--dim)}
   .legend .d{display:inline-block;width:6px;height:6px;border-radius:50%;
     background:var(--accent);margin-right:5px;vertical-align:middle}
@@ -96,8 +103,16 @@
 const CHANNELS = [1,2,3,4,5,6,7,8,9,10,11,12,13];
 const NONOVERLAP = new Set([1,6,11]);
 const RESTRICTED = new Set([12,13,14]);
-const RATES = ["1m","2m","5m","11m","6m","9m","12m","18m","24m","36m","48m","54m",
-               "mcs0","mcs1","mcs2","mcs3","mcs4","mcs5","mcs6","mcs7"];
+// PHY rates grouped by 802.11 standard; the group decides the label/badge.
+const PHY_GROUPS = [
+  {std:"b",  label:"802.11b · DSSS/CCK · 22 MHz",       rates:[["1m","1 Mb/s"],["2m","2 Mb/s"],["5m","5.5 Mb/s"],["11m","11 Mb/s"]]},
+  {std:"g",  label:"802.11g · OFDM · 20 MHz",           rates:[["6m","6 Mb/s"],["9m","9 Mb/s"],["12m","12 Mb/s"],["18m","18 Mb/s"],
+                                                              ["24m","24 Mb/s"],["36m","36 Mb/s"],["48m","48 Mb/s"],["54m","54 Mb/s"]]},
+  {std:"n",  label:"802.11n · HT20 (Wi-Fi 4)",          rates:[0,1,2,3,4,5,6,7].map(i=>["mcs"+i,"MCS"+i])},
+  {std:"ax", label:"802.11ax · HE20 SU (Wi-Fi 6)",      rates:[0,1,2,3,4,5,6,7,8,9].map(i=>["he-mcs"+i,"HE-MCS"+i])},
+];
+const STD_OF = {};
+PHY_GROUPS.forEach(g=>g.rates.forEach(([v])=>STD_OF[v]=g.std));
 const cards = {};            // port -> {el, kind, update(d)}
 const edited = {};           // "port/field" -> timestamp, to avoid clobbering edits
 
@@ -138,6 +153,7 @@ function buildOurs(d){
     <div class="chead">
       <span class="dot"></span>
       <div><div class="id"></div><div class="port"></div></div>
+      <span class="phy v-phy"></span>
       <div class="freq"><div class="big"></div><div class="lbl"></div></div>
     </div>
     <div>
@@ -161,9 +177,10 @@ function buildOurs(d){
     </div>
     <div class="row">
       <div style="flex:1">
-        <div class="section-lbl"><span>PHY rate</span></div>
+        <div class="section-lbl"><span>PHY / standard</span><span class="phy-err v-rerr"></span></div>
         <select class="s-rate">
-          ${RATES.map(r=>`<option value="${r}">${r}${r==='6m'?' — 20 MHz OFDM':''}</option>`).join("")}
+          ${PHY_GROUPS.map(g=>`<optgroup label="${g.label}">${
+            g.rates.map(([v,t])=>`<option value="${v}">${g.std} · ${t}</option>`).join("")}</optgroup>`).join("")}
         </select>
       </div>
       <button class="btn txtoggle s-tx"></button>
@@ -183,7 +200,7 @@ function buildOurs(d){
         sDuty=q(".s-duty"), vDuty=q(".v-duty"), sPwr=q(".s-pwr"), vPwr=q(".v-pwr"),
         sRate=q(".s-rate"), sTx=q(".s-tx"),
         vFps=q(".v-fps"), vOk=q(".v-ok"), vErr=q(".v-err"), vBp=q(".v-bp"),
-        vSsid=q(".v-ssid"), vAge=q(".v-age");
+        vSsid=q(".v-ssid"), vAge=q(".v-age"), vPhy=q(".v-phy"), vRerr=q(".v-rerr");
   const p=d.port;
 
   // channel buttons (built once)
@@ -215,6 +232,11 @@ function buildOurs(d){
     if(!busy(p,"duty",sDuty)){ sDuty.value=d.duty; vDuty.textContent=d.duty+" %"; }
     if(!busy(p,"pwr",sPwr)){ sPwr.value=d.pwr; vPwr.textContent=d.pwr+" dBm"; }
     if(!busy(p,"rate",sRate) && d.rate){ sRate.value=d.rate; }
+    const std=d.phy||STD_OF[d.rate]||"";
+    vPhy.textContent=std?("802.11"+std):"";
+    vPhy.className="phy v-phy"+(std?" phy-"+std:"");
+    vPhy.style.display=std?"":"none";
+    vRerr.textContent=(d.rate_err&&d.rate_err!=="0")?("rejected: "+d.rate_err):"";
     sTx.textContent=on?"STOP TX":"START TX";
     sTx.className="btn txtoggle "+(on?"danger":"primary");
     sTx.dataset.on=on?"1":"0";

@@ -217,9 +217,37 @@ The firmware runs a line REPL (`beesdr-tx>`) on the console. Type these in
 | `ch <1-14>` | Set channel. SSID and DS-parameter IE track it. |
 | `duty <0-100>` | On-air percent of a 100 ms window. 100 = continuous, lower = bursty. |
 | `pwr <2-20>` | Max TX power, dBm. |
-| `rate <name>` | PHY rate: `1m 2m 5m 11m` (DSSS/CCK); `6m 9m 12m 18m 24m 36m 48m 54m` (OFDM, `6m` default); `mcs0`..`mcs7` (HT20). |
+| `rate <name>` | PHY rate — this also picks the 802.11 standard (table below). `6m` default. |
 | `tx <on\|off>` | Enable / pause injection. |
-| `status` | Print MAC, channel, duty, power, tx state, frame/error counters. |
+| `status` | Print MAC, channel, duty, power, rate, `phy`, `rate_err`, tx state, frame/error counters. |
+
+### PHY rates and 802.11 standards
+
+| Standard | `rate` names | PHY | Beacon advertises |
+|---|---|---|---|
+| **802.11b** | `1m 2m 5m 11m` | DSSS/CCK, ~22 MHz | b/g rates |
+| **802.11g** | `6m 9m 12m 18m 24m 36m 48m 54m` | OFDM, 20 MHz | b/g rates |
+| **802.11n** (Wi-Fi 4) | `mcs0`..`mcs7` | HT20, 800 ns GI | + HT Capabilities / Operation |
+| **802.11ax** (Wi-Fi 6) | `he-mcs0`..`he-mcs9` | HE20 SU, 1.6 µs GI | + HT **and** HE Capabilities / Operation |
+
+**802.11ac is not possible**: it is 5 GHz-only and the C6 is a 2.4 GHz radio.
+
+Rates are applied with `esp_wifi_config_80211_tx()` (PHY mode + rate). The older
+`esp_wifi_config_80211_tx_rate()` cannot select HE. ⚠️ **Do not wrap the call in
+`esp_wifi_stop()`/`start()`**, even though the IDF header says "call before
+`esp_wifi_start()`". `stop()` tears down the interface state the library reads, so
+every rate then returns `ESP_FAIL` (seen on hardware). Calling it on the running
+interface works. A failure shows up as `rate_err=<IDF error>` in `status` and in red
+next to the PHY selector in the dashboard.
+
+### Settings persist across power cycles
+
+Every accepted `ch` / `duty` / `pwr` / `rate` / `tx` / `led` command is saved to NVS
+flash right away and restored at boot. **A board unplugged from the Mac and powered
+from any USB supply comes back up transmitting exactly what it was last set to**,
+with no host involved. The dashboard (or `esp32c6_ctl.py`) is only needed to *change*
+settings. Erasing flash (`idf.py erase-flash`) returns a board to the defaults
+(ch 6, 100 %, 20 dBm, `6m`, TX on).
 
 ```bash
 tools/esp32c6_ctl.py send --port /dev/cu.usbmodem101 "ch 11"
@@ -327,8 +355,20 @@ interface, but passes arbitrary **management** frames — so beacons are the rel
 injection primitive across IDF versions.
 
 Each beacon carries the current channel in both its SSID (`BEESDR-TX-chNN`) and its
-DS-parameter IE, plus a MAC-derived BSSID. A sniffer, or the SDR operator, can
-therefore read the channel straight off the air and tell boards apart.
+DS-parameter IE, plus a BSSID equal to the board's own (Espressif-OUI) MAC. A
+sniffer, or the SDR operator, can therefore read the channel straight off the air
+and tell boards apart.
+
+The beacons are standards-conformant so **any scanner lists each board as an open
+access point**: SSID, Supported Rates, DS Parameter Set, **TIM** (mandatory in
+beacons), ERP, Extended Supported Rates, a live **TSF timestamp**, plus HT and HE
+capability/operation IEs when the PHY is n / ax (a scanner takes the Wi-Fi 4/6
+label from these IEs, not from the PHY the frame arrived on). The HE BSS colour
+is derived from the MAC, so co-located boards differ.
+
+**Verified 2026-11-09** with a fresh CoreWLAN scan on this Mac: the board shows as an
+open network on its channel, labelled `b/g`, `b/g/n` or `ax` to match the selected
+`rate`, and disappears with `tx off`.
 
 To a receiver this reads as real WiFi: bursty, 20 MHz OFDM-shaped energy on a known
 channel.

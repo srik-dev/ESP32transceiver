@@ -204,7 +204,8 @@ def main():
                     help="comma list, e.g. 1,6,11 (round-robin if fewer than boards)")
     sa.add_argument("--duty", type=int, help="0-100 on-air percent")
     sa.add_argument("--pwr", type=int, help="2-20 dBm")
-    sa.add_argument("--rate", help="PHY rate: 6m (default), 54m, mcs7, ...")
+    sa.add_argument("--rate", help="PHY rate, selects the standard: b=1m..11m, "
+                    "g=6m(default)..54m, n=mcs0..mcs7, ax=he-mcs0..he-mcs9")
     sa.add_argument("--off", action="store_true",
                     help="configure but leave TX paused (tx off)")
 

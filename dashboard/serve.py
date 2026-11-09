@@ -214,6 +214,8 @@ class Device:
             "duty": geti("duty"),
             "pwr": geti("pwr"),
             "rate": s.get("rate", ""),
+            "phy": s.get("phy", ""),              # "b" / "g" / "n" / "ax"
+            "rate_err": s.get("rate_err", "0"),   # IDF error name if the PHY rejected it
             "tx": s.get("tx", ""),
             "frames_ok": geti("frames_ok"),
             "frames_err": geti("frames_err"),
@@ -260,9 +262,10 @@ class Manager:
 
 MGR = Manager()
 
-VALID_RATES = {"1m", "2m", "5m", "11m", "6m", "9m", "12m", "18m", "24m", "36m",
-               "48m", "54m", "mcs0", "mcs1", "mcs2", "mcs3", "mcs4", "mcs5",
-               "mcs6", "mcs7"}
+VALID_RATES = ({"1m", "2m", "5m", "11m",                                  # 802.11b
+                "6m", "9m", "12m", "18m", "24m", "36m", "48m", "54m"}       # 802.11g
+               | {"mcs%d" % i for i in range(8)}                           # 802.11n HT20
+               | {"he-mcs%d" % i for i in range(10)})                      # 802.11ax HE20
 
 
 def apply_settings(dev, body):
