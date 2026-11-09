@@ -29,19 +29,33 @@
   .btn.small{padding:5px 10px;font-size:12px}
   #banner{display:none;margin:0;padding:9px 20px;background:#f8514922;
     border-bottom:1px solid var(--err);color:#ffd1cd;font-size:13px}
-  main{padding:20px;display:grid;gap:18px;
-    grid-template-columns:repeat(auto-fill,minmax(340px,1fr))}
+  /* auto-fit: the cards share the full row instead of leaving empty tracks;
+     min() keeps a single column from overflowing a phone-width viewport */
+  main{padding:20px;display:grid;gap:18px;align-items:start;
+    grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr))}
+  @media (max-width:480px){ main{padding:12px;gap:12px} header{padding:12px} }
   .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
-    padding:16px;display:flex;flex-direction:column;gap:14px}
+    padding:16px;display:flex;flex-direction:column;gap:14px;min-width:0}
   .card.unknown{border-style:dashed;opacity:.9}
-  .chead{display:flex;align-items:center;gap:10px}
+  /* swatch | dot | mac+port (shrinks, ellipsis) | phy badge | freq */
+  .chead{display:grid;grid-template-columns:auto auto minmax(0,1fr) auto auto;
+    align-items:center;gap:10px}
+  .card.unknown .chead{display:flex}
+  .chead .who{min-width:0}
+  .chead .id,.chead .port{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .dot{width:11px;height:11px;border-radius:50%;flex:none}
   .dot.on{background:var(--accent);box-shadow:0 0 9px var(--accent)}
   .dot.idle{background:var(--warn)}
   .dot.off{background:#5b6774}
+  .swatch{-webkit-appearance:none;appearance:none;flex:none;width:22px;height:22px;
+    padding:0;border:2px solid var(--line);border-radius:50%;background:none;cursor:pointer}
+  .swatch::-webkit-color-swatch-wrapper{padding:0}
+  .swatch::-webkit-color-swatch{border:none;border-radius:50%}
+  .swatch::-moz-color-swatch{border:none;border-radius:50%}
+  .swatch:hover{border-color:#5b6774}
   .chead .id{font-weight:600;font-size:14px}
   .chead .port{color:var(--dim);font-size:11px;font-family:ui-monospace,Menlo,monospace}
-  .freq{margin-left:auto;text-align:right}
+  .freq{text-align:right;white-space:nowrap}
   .freq .big{font-size:20px;font-weight:700}
   .freq .lbl{font-size:11px;color:var(--dim)}
   .section-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.6px;
@@ -151,8 +165,9 @@ function buildOurs(d){
   el.className="card";
   el.innerHTML=`
     <div class="chead">
+      <input type="color" class="swatch s-led" title="Board LED colour — click to change">
       <span class="dot"></span>
-      <div><div class="id"></div><div class="port"></div></div>
+      <div class="who"><div class="id"></div><div class="port"></div></div>
       <span class="phy v-phy"></span>
       <div class="freq"><div class="big"></div><div class="lbl"></div></div>
     </div>
@@ -198,7 +213,7 @@ function buildOurs(d){
   const dot=q(".dot"), id=q(".id"), port=q(".port"),
         big=q(".freq .big"), lbl=q(".freq .lbl"), grid=q(".chan-grid"),
         sDuty=q(".s-duty"), vDuty=q(".v-duty"), sPwr=q(".s-pwr"), vPwr=q(".v-pwr"),
-        sRate=q(".s-rate"), sTx=q(".s-tx"),
+        sRate=q(".s-rate"), sTx=q(".s-tx"), sLed=q(".s-led"),
         vFps=q(".v-fps"), vOk=q(".v-ok"), vErr=q(".v-err"), vBp=q(".v-bp"),
         vSsid=q(".v-ssid"), vAge=q(".v-age"), vPhy=q(".v-phy"), vRerr=q(".v-rerr");
   const p=d.port;
@@ -219,13 +234,19 @@ function buildOurs(d){
   sPwr.onchange=()=>set(p,{pwr:+sPwr.value});
   sRate.onchange=()=>set(p,{rate:sRate.value});
   sTx.onclick=()=>set(p,{tx:(sTx.dataset.on!=="1")});
+  // preview while dragging in the picker; send once it is committed
+  sLed.oninput=()=>{markEdit(p,"led"); el.style.borderLeft="4px solid "+sLed.value;};
+  sLed.onchange=()=>set(p,{led:sLed.value});
 
   function update(d){
     const on=d.tx==="on", live=on&&d.fps>0;
-    el.style.borderLeft = d.color ? ("4px solid "+d.color) : "";
+    if(!busy(p,"led",sLed)){
+      el.style.borderLeft = d.color ? ("4px solid "+d.color) : "";
+      sLed.value = d.color || "#000000";
+    }
     dot.className="dot "+(!on?"off":(live?"on":"idle"));
     id.textContent=d.mac||"ESP32-C6";
-    port.textContent=d.port;
+    port.textContent=d.port; port.title=d.port;
     big.innerHTML=(d.freq?d.freq+'<span style="font-size:12px;color:var(--dim)"> MHz</span>':'—');
     lbl.textContent="channel "+(d.ch||"—");
     CHANNELS.forEach(c=>chanEls[c].classList.toggle("sel", c===d.ch));

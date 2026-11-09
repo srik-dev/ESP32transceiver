@@ -23,6 +23,8 @@
  *                        ax: he-mcs0..he-mcs9        (HE20 SU, 1.6 us GI)
  *     tx    <on|off>   enable / pause injection
  *     status           print current state + frame/error counters
+ *     led   <name|#rrggbb>  status LED colour (named, or any hex colour;
+ *                        hex is dimmed to the same safe brightness)
  *
  * Every setting above (plus the LED colour) is saved to NVS flash the moment it
  * is changed and restored at boot, so a board unplugged from the PC and powered
@@ -499,12 +501,25 @@ static int cmd_led(int argc, char **argv)
 {
     if (argc < 2) {
         printf("usage: led <off|red|green|blue|yellow|cyan|magenta|white|orange>"
-               " | led rgb <r> <g> <b>\n");
+               " | led #rrggbb | led rgb <r> <g> <b>\n");
         return 1;
     }
     int r = 0, g = 0, b = 0;
     const int L = LED_LVL;
-    if (strcmp(argv[1], "rgb") == 0 && argc >= 5) {
+    if (argv[1][0] == '#') {
+        /* Display colour as picked in a UI. Scaled to LED_LVL so it lands at the
+         * same brightness/current as the named colours; rounded up so any
+         * non-zero channel stays lit. Reported back verbatim as led=#rrggbb. */
+        unsigned v;
+        char *end;
+        if (strlen(argv[1]) != 7) { printf("ERR bad hex colour '%s'\n", argv[1]); return 1; }
+        v = (unsigned)strtoul(argv[1] + 1, &end, 16);
+        if (*end != '\0') { printf("ERR bad hex colour '%s'\n", argv[1]); return 1; }
+        r = (int)(((v >> 16) & 0xff) * L + 254) / 255;
+        g = (int)(((v >>  8) & 0xff) * L + 254) / 255;
+        b = (int)(( v        & 0xff) * L + 254) / 255;
+        snprintf(g_led_name, sizeof(g_led_name), "#%06x", v);
+    } else if (strcmp(argv[1], "rgb") == 0 && argc >= 5) {
         r = atoi(argv[2]); g = atoi(argv[3]); b = atoi(argv[4]);
         snprintf(g_led_name, sizeof(g_led_name), "rgb");
     } else {

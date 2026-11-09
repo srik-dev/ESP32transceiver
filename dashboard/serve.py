@@ -50,7 +50,61 @@ LED_COLORS = {
     "98:a3:16:98:12:14": "red",
     "f0:f5:bd:0e:df:f8": "green",
     "ac:eb:e6:c1:42:cc": "blue",
+    "ac:eb:e6:da:78:44": "yellow",
+    "ac:eb:e6:d9:a3:ac": "magenta",
 }
+
+# Colours picked in the dashboard, by MAC, as "#rrggbb". These override
+# LED_COLORS and live next to serve.py (the deployed runtime dir, which deploy.sh
+# never overwrites), so a choice survives server restarts and redeploys. The board
+# also keeps it in NVS; this copy re-applies it if a reflash erases the board.
+COLORS_FILE = os.path.join(HERE, "colors.json")
+_colors_lock = threading.Lock()
+
+# Firmware's named colours -> display hex (the UI colour picker needs hex).
+NAMED_HEX = {
+    "off": "#000000", "red": "#ff0000", "green": "#00ff00", "blue": "#0000ff",
+    "yellow": "#ffff00", "cyan": "#00ffff", "magenta": "#ff00ff",
+    "white": "#ffffff", "orange": "#ff4000",
+}
+HEX_RE = re.compile(r"^#[0-9a-f]{6}$")
+
+
+def _load_colors():
+    try:
+        with open(COLORS_FILE) as f:
+            data = json.load(f)
+        return {k.lower(): v.lower() for k, v in data.items()
+                if isinstance(v, str) and HEX_RE.match(v.lower())}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+USER_COLORS = _load_colors()
+
+
+def save_user_color(mac, hexcol):
+    with _colors_lock:
+        USER_COLORS[mac] = hexcol
+        tmp = COLORS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(USER_COLORS, f, indent=2, sort_keys=True)
+        os.replace(tmp, COLORS_FILE)
+
+
+def desired_led(mac):
+    """Colour the board should show: dashboard pick, else the built-in tag."""
+    return USER_COLORS.get(mac) or LED_COLORS.get(mac)
+
+
+def to_hex(led):
+    """Firmware led= value ('red', '#12ab34', 'rgb', 'off') -> '#rrggbb' or None."""
+    if not led:
+        return None
+    led = led.lower()
+    if HEX_RE.match(led):
+        return led
+    return NAMED_HEX.get(led)
 
 # 2.4 GHz channel -> centre frequency (MHz)
 def chan_freq(ch):
@@ -92,6 +146,7 @@ class Device:
         self.fps = 0.0
         self._last_ok = None
         self._last_ok_t = None
+        self._led_fallback = None   # hex sent via `led rgb` to old firmware
         self._stop = threading.Event()
         self._thread = None
 
@@ -190,12 +245,28 @@ class Device:
                 self._last_ok, self._last_ok_t = ok, now
             except ValueError:
                 pass
-            # keep the board's colour tag applied (reset-on-open wipes it)
-            desired = LED_COLORS.get(self.status.get("mac", ""))
-            if desired and self.status.get("led") != desired:
-                self.exchange("led %s" % desired, 0.2)
+            # keep the board's colour tag applied (a reflash wipes it)
+            desired = desired_led(self.status.get("mac", ""))
+            if (desired and self.status.get("led") != desired
+                    and self._led_fallback != desired):
+                self.set_led(desired)
         else:
             self.is_ours = False
+
+    def set_led(self, colour):
+        """Send a named or '#rrggbb' colour. Firmware older than the hex `led`
+        command answers ERR; fall back to `led rgb` at the same dimmed level and
+        remember it, since that firmware can only report led=rgb (otherwise the
+        poller would resend it every second)."""
+        resp = self.exchange("led %s" % colour, 0.3)
+        if "ERR" in resp and colour.startswith("#"):
+            v = int(colour[1:], 16)
+            r, g, b = ((((v >> s) & 0xff) * 48 + 254) // 255 for s in (16, 8, 0))
+            resp = self.exchange("led rgb %d %d %d" % (r, g, b), 0.3)
+            self._led_fallback = colour
+        else:
+            self._led_fallback = None
+        return resp
 
     def as_dict(self):
         s = self.status
@@ -222,7 +293,10 @@ class Device:
             "bp": geti("bp"),
             "ssid": s.get("ssid", ""),
             "led": s.get("led", ""),
-            "color": LED_COLORS.get(s.get("mac", "")),
+            # display colour: what the board reports, else what it should show
+            # (old firmware can only report led=rgb, which has no hex)
+            "color": to_hex(s.get("led", ""))
+                     or to_hex(desired_led(s.get("mac", ""))),
             "fps": round(self.fps, 1),
             "age": round(time.time() - self.last_seen, 1) if self.last_seen else None,
         }
@@ -292,6 +366,15 @@ def apply_settings(dev, body):
     if "tx" in body:
         tx = "on" if body["tx"] in (True, "on", "true", 1, "1") else "off"
         out.append(dev.exchange("tx %s" % tx, 0.3))
+    if "led" in body:
+        led = str(body["led"]).lower()
+        mac = dev.status.get("mac", "")
+        if not HEX_RE.match(led):
+            raise ValueError("led must be #rrggbb")
+        if not mac:
+            raise ValueError("board has not reported its MAC yet")
+        save_user_color(mac, led)
+        out.append(dev.set_led(led))
     dev.refresh()
     return out
 

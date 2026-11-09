@@ -10,3 +10,9 @@ firmware/dependencies.lock
 
 # macOS
 .DS_Store
+
+# dashboard: per-board LED colours picked in the UI (runtime state)
+dashboard/colors.json
+
+# clangd index cache
+firmware/.cache/

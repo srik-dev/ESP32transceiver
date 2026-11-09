@@ -219,7 +219,8 @@ The firmware runs a line REPL (`beesdr-tx>`) on the console. Type these in
 | `pwr <2-20>` | Max TX power, dBm. |
 | `rate <name>` | PHY rate — this also picks the 802.11 standard (table below). `6m` default. |
 | `tx <on\|off>` | Enable / pause injection. |
-| `status` | Print MAC, channel, duty, power, rate, `phy`, `rate_err`, tx state, frame/error counters. |
+| `status` | Print MAC, channel, duty, power, rate, `phy`, `rate_err`, tx state, `led`, frame/error counters. |
+| `led <name\|#rrggbb>` | Status-LED colour: `off red green blue yellow cyan magenta white orange`, or any hex colour (dimmed to the same safe level as the names; reported back as `led=#rrggbb`). |
 
 ### PHY rates and 802.11 standards
 
@@ -333,7 +334,14 @@ The UI is a thin client over this; it is equally usable from `curl` or a script.
 
 Settable fields, applied in this order and silently skipped when out of range:
 `ch` (1–14), `duty` (0–100), `pwr` (2–20), `rate` (one of the names above), `tx`
-(`true` / `"on"` / `1` → on, anything else → off).
+(`true` / `"on"` / `1` → on, anything else → off), `led` (`#rrggbb`, `/api/set` only).
+
+**Board colours.** Click the round swatch at the top-left of a card to pick that
+board's LED colour. The choice is stored on the board (NVS) *and* in
+`colors.json` next to the running `serve.py` (keyed by MAC; `deploy.sh` never
+overwrites it), and re-applied whenever a board reports a different colour — e.g.
+after a full-erase reflash. Boards with no pick fall back to the `LED_COLORS`
+table in `serve.py`.
 
 Each device reports `port`, `mac`, `ch`, `freq`, `duty`, `pwr`, `rate`, `tx`,
 `frames_ok`, `is_ours` (does it speak this firmware's protocol) and `open_error`.
