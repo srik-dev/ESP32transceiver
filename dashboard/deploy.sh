@@ -46,6 +46,20 @@ mkdir -p "$RUNTIME"
 cp "$HERE/serve.py" "$HERE/index.html" "$HERE/dashboard.sh" \
    "$HERE/../tools/ch340_usb.py" "$RUNTIME"/
 chmod +x "$RUNTIME/dashboard.sh"
+
+# Firmware images for the per-card "Reflash" button: whatever is currently built,
+# one folder per target, laid out exactly as each build's flash_args expects.
+FW="$HERE/../firmware"
+for t in esp32c6 esp32s3; do
+  b="$FW/build"; [ "$t" = esp32c6 ] || b="$FW/build-$t"
+  [ -f "$b/flash_args" ] || continue
+  d="$RUNTIME/firmware/$t"
+  mkdir -p "$d/bootloader" "$d/partition_table"
+  cp -p "$b/flash_args" "$b/beesdr_wifi_tx.bin" "$d"/
+  cp -p "$b/bootloader/bootloader.bin" "$d/bootloader"/
+  cp -p "$b/partition_table/partition-table.bin" "$d/partition_table"/
+  echo "firmware $t -> $d"
+done
 echo "synced -> $RUNTIME"
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true

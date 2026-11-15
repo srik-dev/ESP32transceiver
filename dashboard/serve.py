@@ -26,8 +26,11 @@ Usage:
     python3 serve.py --host 127.0.0.1  # localhost only
     python3 serve.py --port 9000
 
-Serial-port contention: only one process may hold a port. Do NOT run
-tools/esp32tx_ctl.py at the same time as this server.
+Serial-port contention: only one process may hold a port. Each card has a
+"Release port" toggle that makes this server let go of that one board, so
+tools/esp32tx_ctl.py, tools/flash.sh or idf.py monitor can use it; toggle it back
+to reconnect. "Reflash" on a card releases the port, writes the prebuilt firmware
+with esptool, and reconnects.
 """
 import argparse
 import glob
@@ -35,6 +38,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import termios
 import threading
@@ -363,14 +367,163 @@ class Device:
         }
 
 
+# ------------------------------------------------------------- reflashing ---
+# Reflash writes PREBUILT images; it never compiles. They are looked for in
+#   <here>/firmware/<target>/         the deployed copy (deploy.sh puts them there)
+#   ../firmware/build[-<target>]/     the repo's build trees (foreground runs)
+# each holding flash_args plus the three .bin files it names.
+TARGETS = ("esp32c6", "esp32s3")
+
+
+def image_dir(target):
+    cands = [os.path.join(HERE, "firmware", target),
+             os.path.join(HERE, "..", "firmware",
+                          "build" if target == "esp32c6" else "build-" + target)]
+    for d in cands:
+        if os.path.isfile(os.path.join(d, "flash_args")):
+            return d
+    return None
+
+
+def firmware_info():
+    """target -> build time of the image a reflash would write (None = missing)."""
+    out = {}
+    for t in TARGETS:
+        d = image_dir(t)
+        app = os.path.join(d, "beesdr_wifi_tx.bin") if d else None
+        out[t] = os.path.getmtime(app) if app and os.path.isfile(app) else None
+    return out
+
+
+def esptool_python():
+    """A python that can `import esptool`: $ESPTOOL_PYTHON, else the shared
+    ESP-IDF tools env (the stdlib-only system python this server runs on has none)."""
+    env = os.environ.get("ESPTOOL_PYTHON")
+    if env:
+        return env
+    root = os.environ.get("IDF_TOOLS_PATH") or os.path.expanduser("~/.espressif")
+    cands = sorted(glob.glob(os.path.join(root, "python_env", "*", "bin", "python")))
+    return cands[-1] if cands else None
+
+
+def esptool_cmd(py, port, args):
+    if ch340_usb and ch340_usb.is_port(port):
+        return [py, os.path.abspath(ch340_usb.__file__), "esptool", port] + args
+    return [py, "-m", "esptool", "-p", port] + args
+
+
 class Manager:
     def __init__(self):
         self.devices = {}
         self.lock = threading.Lock()
+        # Ports this server has let go of: port -> {"why": "released"|"flashing",
+        # "last": the card's last state}. scan() leaves them alone.
+        self.held = {}
+        self.flash = {}     # port -> {"state", "pct", "log", "time", "target"}
+
+    # ---- release / reconnect ----
+    def release(self, port, why="released"):
+        with self.lock:
+            if port in self.held:
+                self.held[port]["why"] = why
+                return True
+            d = self.devices.pop(port, None)
+            if d is None:
+                return False
+            last = d.as_dict()
+            self.held[port] = {"why": why, "last": last}
+        d.close()
+        if d._thread:
+            d._thread.join(2.0)     # let an in-flight status poll finish
+        return True
+
+    def attach(self, port):
+        with self.lock:
+            self.held.pop(port, None)
+        self.scan()
+
+    # ---- reflash ----
+    def start_flash(self, port):
+        with self.lock:
+            if self.flash.get(port, {}).get("state") == "running":
+                raise ValueError("already flashing")
+            was_released = self.held.get(port, {}).get("why") == "released"
+            known = port in self.devices or port in self.held
+            self.flash[port] = {"state": "running", "pct": 0, "log": "", "time": time.time(),
+                                "target": ""}
+        if not known:
+            self.flash.pop(port, None)
+            raise ValueError("no such device")
+        self.release(port, "flashing")
+        threading.Thread(target=self._flash, args=(port, was_released), daemon=True).start()
+
+    def _run(self, port, cmd, cwd=None):
+        """Run one esptool command, streaming its output into the flash record."""
+        st = self.flash[port]
+        try:
+            proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT)
+        except OSError as e:
+            st["log"] += "%s\n" % e
+            return 1, ""
+        out = ""
+        while True:
+            chunk = os.read(proc.stdout.fileno(), 4096)
+            if not chunk:
+                break
+            out += chunk.decode("utf-8", "replace")
+            st["log"] = (st["log"] + chunk.decode("utf-8", "replace"))[-4000:]
+            pcts = re.findall(r"\((\d+) %\)", out[-200:])
+            if pcts:
+                st["pct"] = int(pcts[-1])
+        return proc.wait(), out
+
+    def _flash(self, port, was_released):
+        st = self.flash[port]
+        ok = False
+        try:
+            py = esptool_python()
+            if not py:
+                raise RuntimeError("no python with esptool found (looked in "
+                                   "~/.espressif/python_env; set ESPTOOL_PYTHON)")
+            target = self.held.get(port, {}).get("last", {}).get("chip", "")
+            if target not in TARGETS:
+                # never ran our firmware (or is silent): ask the ROM bootloader
+                rc, out = self._run(port, esptool_cmd(py, port, ["chip_id"]))
+                m = re.search(r"ESP32-[A-Z][0-9]+", out)
+                target = m.group(0).lower().replace("-", "") if m else ""
+            st["target"] = target
+            if target not in TARGETS:
+                raise RuntimeError("could not identify the chip on %s" % port)
+            imgs = image_dir(target)
+            if not imgs:
+                raise RuntimeError("no firmware image for %s - build it (tools/flash.sh) "
+                                   "and run dashboard/deploy.sh" % target)
+            rc, _ = self._run(port, esptool_cmd(py, port, [
+                "--chip", target, "-b", "460800", "--after", "hard_reset",
+                "write_flash", "@flash_args"]), cwd=imgs)
+            ok = (rc == 0)
+        except Exception as e:      # report every failure on the card
+            st["log"] = (st["log"] + "%s\n" % e)[-4000:]
+        st["state"] = "ok" if ok else "failed"
+        st["time"] = time.time()
+        if was_released:
+            with self.lock:
+                if port in self.held:
+                    self.held[port]["why"] = "released"
+        else:
+            time.sleep(0.5)         # let the board come out of reset
+            self.attach(port)
 
     def scan(self):
         ports = set(find_ports())
         with self.lock:
+            for p in list(self.held):
+                # an unplugged board forgets its release; mid-flash the port may
+                # blink out while the chip resets, so keep that one
+                if p not in ports and self.held[p]["why"] != "flashing":
+                    del self.held[p]
+            ports -= set(self.held)
             for p in ports:
                 if p not in self.devices:
                     d = Device(p)
@@ -392,7 +545,17 @@ class Manager:
     def snapshot(self):
         with self.lock:
             devs = list(self.devices.values())
-        return sorted((d.as_dict() for d in devs), key=lambda x: x["port"])
+            held = {p: dict(h["last"], released=True, why=h["why"])
+                    for p, h in self.held.items()}
+        out = [d.as_dict() for d in devs if d.port not in held] + list(held.values())
+        for d in out:
+            d.setdefault("released", False)
+            f = self.flash.get(d["port"])
+            if f:
+                d["flash"] = {"state": f["state"], "pct": f["pct"], "time": f["time"],
+                              "target": f["target"],
+                              "log": f["log"][-600:] if f["state"] != "ok" else ""}
+        return sorted(out, key=lambda x: x["port"])
 
 
 MGR = Manager()
@@ -511,7 +674,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"error": "index.html missing"})
             return
         if self.path == "/api/devices":
-            self._send(200, {"devices": MGR.snapshot(),
+            self._send(200, {"devices": MGR.snapshot(), "firmware": firmware_info(),
                              "time": time.time()})
             return
         self._send(404, {"error": "not found"})
@@ -537,6 +700,30 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"error": str(e)})
                 return
             self._send(200, {"device": dev.as_dict()})
+            return
+
+        if self.path == "/api/release":
+            # {port, released: true|false} - let go of / reconnect one board
+            port = body.get("port")
+            if body.get("released", True):
+                if not MGR.release(port):
+                    self._send(404, {"error": "no such device", "port": port})
+                    return
+            else:
+                if MGR.held.get(port, {}).get("why") == "flashing":
+                    self._send(409, {"error": "flash in progress"})
+                    return
+                MGR.attach(port)
+            self._send(200, {"devices": MGR.snapshot()})
+            return
+
+        if self.path == "/api/flash":
+            try:
+                MGR.start_flash(body.get("port"))
+            except ValueError as e:
+                self._send(409, {"error": str(e)})
+                return
+            self._send(200, {"devices": MGR.snapshot()})
             return
 
         if self.path == "/api/all":

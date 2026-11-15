@@ -426,6 +426,8 @@ The UI is a thin client over this; it is equally usable from `curl` or a script.
 | `POST` | `/api/set` | `{port, ...fields}` | `{device}` |
 | `POST` | `/api/all` | `{...fields}` | `{applied: [ports], devices}` |
 | `POST` | `/api/raw` | `{port, cmd}` | `{resp, device}` |
+| `POST` | `/api/release` | `{port, released}` | `{devices}` |
+| `POST` | `/api/flash` | `{port}` | `{devices}` (progress in each device's `flash`) |
 
 Settable fields, applied in this order and silently skipped when out of range:
 `ch` (1–14), `duty` (0–100), `pwr` (2–20), `rate` (one of the names above), `tx`
@@ -436,6 +438,24 @@ fields: `ble`, `bphy`, `bch`, `advch` (list, e.g. `[37,39]`), `itvl`, `bpwr`, `p
 `len` — same values as the serial commands. In the UI each card has a
 **WiFi | Bluetooth LE** switch under its header; **All WiFi** / **All BLE** in the
 top bar switch every board.
+
+**Release port / Reflash.** Every card has two buttons at the bottom:
+
+- **Release port** is a toggle. The service normally holds every board's serial
+  port; releasing makes it let go of *that one board* so `tools/flash.sh`,
+  `esp32tx_ctl.py` or `idf.py monitor` can use it, without stopping the service.
+  The card dims; **Reconnect** takes the port back. Unplugging the board clears it.
+- **Reflash** (click twice — the first click arms it) releases the port, writes the
+  firmware with esptool, and reconnects. Progress and the result show next to the
+  button; settings in NVS are kept. It works on "Unknown serial device" cards too
+  (the chip type is read from the ROM bootloader), so a brand-new board can be
+  flashed from the browser.
+
+Reflash writes **prebuilt** images and never compiles. `deploy.sh` copies whatever
+is in `firmware/build*/` into the service's runtime folder, so after changing the
+firmware: build (`idf.py build` or `tools/flash.sh`), then `dashboard/deploy.sh`.
+The button's tooltip shows the build time of the image it will write. esptool comes
+from the shared IDF python env under `~/.espressif` (override with `ESPTOOL_PYTHON`).
 
 **Board colours.** Click the round swatch at the top-left of a card to pick that
 board's LED colour. The choice is stored on the board (NVS) *and* in
@@ -496,7 +516,8 @@ channel.
 - **`duty=100` is ~99% on-air**, not 100 — one 1 ms scheduler yield per 100 ms
   window keeps the watchdog and idle task alive. Irrelevant for RF purposes.
 - **One port = one board, one process.** The dashboard service holds every port it
-  finds; stop it before flashing or before using `esp32tx_ctl.py`.
+  finds; use the card's **Release port** toggle (or stop the service) before
+  flashing or using `esp32tx_ctl.py` on that board.
 - **The dashboard has no authentication.** Keep it on `127.0.0.1` unless you have a
   reason not to.
 - **A charge-only USB cable** lights the LED and enumerates nothing.

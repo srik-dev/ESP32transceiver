@@ -117,6 +117,15 @@
   .rf-grid .chan{padding:6px 0;font-size:12px;border-radius:6px}
   .adv3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
   .adv3 .chan small{display:block;font-weight:400;font-size:10.5px;opacity:.75}
+  /* per-board port release + reflash */
+  .foot{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);padding-top:12px}
+  .foot .v-flash{flex:1;min-width:0;font-size:12px;color:var(--dim);text-align:right;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .foot .v-flash.ok{color:var(--accent)} .foot .v-flash.bad{color:var(--err)}
+  .btn.on{background:#d2992222;border-color:var(--warn);color:#f5d99a}
+  .btn:disabled{opacity:.5;cursor:default}
+  .card.released>*:not(.chead):not(.foot){opacity:.35;pointer-events:none}
+  .card.released{border-style:dashed}
   .hint{font-size:11.5px;color:var(--dim);line-height:1.45}
   .legend{font-size:11px;color:var(--dim)}
   .legend .d{display:inline-block;width:6px;height:6px;border-radius:50%;
@@ -219,6 +228,56 @@ async function allMode(m){
 async function autoPlan(){
   const ours=lastState.filter(d=>d.is_ours), plan=[1,6,11];
   for(let i=0;i<ours.length;i++) await set(ours[i].port,{ch:plan[i%3]});
+}
+
+// ---- footer shared by every card: release-port toggle + reflash ----
+let firmware={};
+function buildFoot(card, port){
+  const f=document.createElement("div");
+  f.className="foot";
+  f.innerHTML=`<button class="btn small s-rel"></button>
+    <button class="btn small s-flash"></button><span class="v-flash"></span>`;
+  card.appendChild(f);
+  const bRel=f.querySelector(".s-rel"), bFlash=f.querySelector(".s-flash"), vFlash=f.querySelector(".v-flash");
+  let last={}, armed=0, pending=false;
+  bRel.onclick=async()=>{
+    if(pending) return;
+    pending=true; paint();                 // closing the port can take a second
+    try{ await api("/api/release",{port, released:!last.released}); await refresh(); }
+    catch(e){ setBanner("Release failed: "+e.message); }
+    pending=false; paint();
+  };
+  // two clicks: the first arms the button for 4 s, the second flashes
+  bFlash.onclick=async()=>{
+    if(Date.now()>armed){ armed=Date.now()+4000; paint(); setTimeout(paint,4100); return; }
+    armed=0;
+    try{ await api("/api/flash",{port}); refresh(); }
+    catch(e){ setBanner("Reflash failed to start: "+e.message); }
+  };
+  function paint(){
+    const d=last, fl=d.flash||{}, busy=fl.state==="running";
+    card.classList.toggle("released", !!d.released);
+    bRel.textContent=d.released?"Reconnect":"Release port";
+    bRel.className="btn small s-rel"+(d.released?" on":"");
+    bRel.disabled=busy||pending;
+    bRel.title=d.released
+      ?"The dashboard has let go of this port. Click to take it back."
+      :"Let go of this board's serial port so flash.sh, esp32tx_ctl.py or idf.py monitor can use it.";
+    const built=firmware[d.chip];
+    bFlash.textContent=busy?"Flashing…":(Date.now()<armed?"Click again to flash":"Reflash");
+    bFlash.className="btn small s-flash"+(Date.now()<armed&&!busy?" danger":"");
+    bFlash.disabled=busy;
+    bFlash.title="Write the prebuilt firmware to this board"+
+      (built?" (built "+new Date(built*1000).toLocaleString()+")":"")+". Settings are kept.";
+    vFlash.className="v-flash"+(fl.state==="ok"?" ok":fl.state==="failed"?" bad":"");
+    const lastLine=(fl.log||"").trim().split(/[\r\n]+/).pop()||"";
+    vFlash.textContent=busy?("writing "+(fl.target||"")+" "+fl.pct+" %")
+      :fl.state==="ok"?("flashed "+new Date(fl.time*1000).toLocaleTimeString())
+      :fl.state==="failed"?("flash failed: "+lastLine)
+      :d.released?"port released":"";
+    vFlash.title=fl.state==="failed"?fl.log:"";
+  }
+  return d=>{ last=d; paint(); };
 }
 
 // ---- build an editable device card once; return refs + update() ----
@@ -447,8 +506,9 @@ function buildOurs(d){
   sLed.oninput=()=>{markEdit(p,"led"); el.style.borderLeft="4px solid "+sLed.value;};
   sLed.onchange=()=>set(p,{led:sLed.value});
 
+  const foot=buildFoot(el,p);
   function update(d){
-    last=d;
+    last=d; foot(d);
     const on=d.tx==="on", live=on&&d.fps>0;
     if(d.has_ble) el.dataset.ble="1"; else delete el.dataset.ble;
     const mode=pendingMode||d.mode||"wifi";
@@ -491,9 +551,11 @@ function buildUnknown(d){
   el.innerHTML=`<div class="chead"><span class="dot off"></span>
       <span class="id">Unknown serial device</span></div>
     <div class="warnbox"><b>No status reply</b> from <code>${d.port}</code>.<br><br>
-      • <b>New board?</b> Flash it: <code>tools/flash.sh ${d.port}</code><br>
+      • <b>New board?</b> Press <b>Reflash</b> below, or run <code>tools/flash.sh ${d.port}</code><br>
       • <b>Was it working?</b> It likely lost power or crashed — unplug/replug it. If a board drops when others transmit, use a <b>powered USB hub</b> or lower TX power.</div>`;
-  return {el, kind:"unknown", update(){}};
+  const foot=buildFoot(el,d.port);
+  foot(d);
+  return {el, kind:"unknown", update:foot};
 }
 
 let lastState=[];
@@ -520,6 +582,7 @@ async function refresh(){
     const j=await api("/api/devices");
     setBanner("");
     document.getElementById("clock").textContent=new Date(j.time*1000).toLocaleTimeString();
+    firmware=j.firmware||{};
     reconcile(j.devices);
   }catch(e){
     setBanner("Dashboard server unreachable — is serve.py still running? ("+e.message+")");
