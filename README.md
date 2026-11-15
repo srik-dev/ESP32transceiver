@@ -1,7 +1,7 @@
-# ESP32Tx — ESP32-C6 WiFi channel transmitters
+# ESP32-Tx — ESP32 WiFi / Bluetooth LE transmitters
 
-Firmware and host tooling that turn one or more **ESP32-C6** dev boards into
-controllable 2.4 GHz WiFi emitters, each parked on a channel you choose, with a
+Firmware and host tooling that turn one or more **ESP32-C6 or ESP32-S3** dev boards into
+controllable 2.4 GHz **WiFi or Bluetooth LE** emitters, each parked on a channel you choose, with a
 **web dashboard that runs continuously on the Mac** so the boards are always
 controllable without launching anything.
 
@@ -18,14 +18,14 @@ whatever ambient ISM traffic happens to be in the room.
 | **Dashboard URL** | **http://127.0.0.1:8760/** |
 | **Port** | **8760** (TCP; `--port` to change) |
 | **Always running?** | **Yes** — macOS LaunchAgent, starts at login, `KeepAlive` restarts it |
-| **Service label** | `com.beesdr.esp32c6-dashboard` |
-| **Runs from** | `~/Library/Application Support/BEESDR/ESP32C6-dashboard/` (**not** this folder — see [Why the service runs from a copy](#why-the-service-runs-from-a-copy)) |
-| **Logs** | `~/Library/Logs/beesdr-esp32c6-dashboard{,.error}.log` |
+| **Service label** | `com.beesdr.esp32tx-dashboard` |
+| **Runs from** | `~/Library/Application Support/BEESDR/ESP32Tx-dashboard/` (**not** this folder — see [Why the service runs from a copy](#why-the-service-runs-from-a-copy)) |
+| **Logs** | `~/Library/Logs/beesdr-esp32tx-dashboard{,.error}.log` |
 | **Runtime deps** | System `python3` only — stdlib, no venv, no pyserial |
 | **Toolchain** | Shared ESP-IDF **v5.5.5** at `~/esp/esp-idf` |
-| **Target** | `esp32c6` |
+| **Targets** | `esp32c6`, `esp32s3` (one source tree; `flash.sh` picks per board) |
 
-Plug a C6 into USB and it appears in the dashboard within a couple of seconds —
+Plug a board into USB and it appears in the dashboard within a couple of seconds —
 there is nothing to start.
 
 ```bash
@@ -37,7 +37,7 @@ dashboard/deploy.sh --status         # is the service loaded and answering?
 
 ## Scope
 
-**What this is.** A lab-bench RF signal generator built out of commodity ESP32-C6
+**What this is.** A lab-bench RF signal generator built out of commodity ESP32-C6 / ESP32-S3
 boards, plus everything needed to drive it: firmware, a serial control tool, and an
 always-on web UI. One firmware image serves every board; boards are differentiated
 at runtime by the channel you assign, so a bag of identical boards becomes a
@@ -49,9 +49,11 @@ multi-channel emitter set.
   beacon frames and nothing else.
 - **Not a receiver.** Despite the repository name, this is transmit-only. There is
   no capture, demodulation or sniffing path.
-- **Not BLE.** The C6 supports it; this firmware does not use it.
+- **Not a BLE peripheral.** BLE mode only broadcasts (advertising or a DTM test
+  carrier); nothing can connect to a board. See [Bluetooth LE mode](#bluetooth-le-mode).
+- **Not WiFi and BLE at once.** One radio: a board is in one mode or the other.
 - **Not remotely controlled over WiFi.** Control is **USB serial only**, by
-  necessity — the C6 is a single-radio, 2.4 GHz-only part and cannot stay
+  necessity — the C6 / S3 is a single-radio, 2.4 GHz-only part and cannot stay
   associated to an access point while injecting on a channel of your choosing. The
   dashboard is a web UI *on the Mac* that bridges HTTP to the USB serial ports; the
   boards themselves are never on the network.
@@ -69,19 +71,22 @@ ESP32Tx/
 ├── README.md                  this file
 ├── .gitignore                 ignores IDF build output (see "Generated" below)
 │
-├── firmware/                  ESP-IDF project, target esp32c6
+├── firmware/                  ESP-IDF project, targets esp32c6 / esp32s3
 │   ├── CMakeLists.txt         project file; finds IDF via $ENV{IDF_PATH}
-│   ├── sdkconfig.defaults     the only tracked config — sdkconfig is derived
+│   ├── sdkconfig.defaults     tracked config — sdkconfig is derived from it
+│   ├── sdkconfig.defaults.esp32c6   C6-only overrides (enables BLE DTM)
 │   └── main/
 │       ├── CMakeLists.txt     component registration
 │       ├── idf_component.yml  managed deps (espressif/led_strip)
-│       └── beacon_tx.c        the whole firmware: TX loop + serial command REPL
+│       ├── beacon_tx.c        boot, WiFi TX loop, serial command REPL, NVS
+│       └── ble_tx.c / .h      Bluetooth LE mode: advertising, Coded PHY, DTM
 │
 ├── tools/                     host-side, run from the repo root
 │   ├── idf_env.sh             SOURCE this to activate the shared ESP-IDF
 │   ├── setup_idf.sh           one-time IDF install (reference / fallback)
 │   ├── flash.sh               build once, flash one or many boards
-│   └── esp32c6_ctl.py         enumerate boards, assign channels (stdlib only)
+│   ├── esp32tx_ctl.py         enumerate boards, assign channels (stdlib only)
+│   └── ch340_usb.py           libusb driver for CH340K bridges macOS has no driver for
 │
 └── dashboard/                 the always-on web UI, port 8760
     ├── serve.py               stdlib HTTP server + USB-serial bridge
@@ -109,7 +114,7 @@ delete `firmware/build/` and rebuild.
 
 ## Hardware
 
-Any ESP32-C6 dev board. Two USB wiring styles exist and the tooling handles both,
+Any ESP32-C6 or ESP32-S3 dev board. Two USB wiring styles exist and the tooling handles both,
 but they are worth telling apart because they enumerate differently:
 
 | Path | Enumerates as | Console on |
@@ -118,13 +123,52 @@ but they are worth telling apart because they enumerate differently:
 | USB-UART bridge, e.g. WCH CH343 (VID `0x1a86`) | `/dev/cu.usbmodem*`, `usbserial*`, `wchusbserial*` | UART0 |
 
 The boards in use here are the **CH343 bridge** variety, with the firmware console
-on **UART0**. `flash.sh`, `esp32c6_ctl.py` and `serve.py` all glob every pattern
+on **UART0**. `flash.sh`, `esp32tx_ctl.py` and `serve.py` all glob every pattern
 above and filter out the macOS Bluetooth and `debug-console` pseudo-ports, so
 either style is picked up automatically.
 
 Whichever the board, one USB cable carries the log, the flash channel and the
 interactive REPL on the **same** port — no BOOT/RESET button dance for normal
 flashing.
+
+### ESP32-S3 boards
+
+The same firmware also builds for **`esp32s3`** (`tools/flash.sh` reads the chip
+type off each port and builds the right target into `firmware/build-esp32s3/`).
+Differences from the C6:
+
+- **No 802.11ax.** The S3 has no HE radio, so the `he-mcs*` rates are compiled
+  out and answer `ERR unknown rate`; b / g / n all work.
+- **Status LED on GPIO48** (DevKitC-1 v1.0 and most clones). v1.1 boards moved it
+  to GPIO38 — build with `-DLED_GPIO=38`.
+- The dashboard shows each card's chip (`status` reports `chip=`) and offers only
+  the standards that chip can transmit.
+
+### Driverless CH340K bridges (`ch340:` ports)
+
+A CH340K bridge (USB `1a86:7522`) gets **no `/dev/cu.*` port on macOS** — Apple's
+built-in driver only matches `1a86:7523` and `1a86:55d4`. Rather than requiring
+WCH's driver (admin + system-extension approval), `tools/ch340_usb.py` drives the
+bridge from userspace through libusb. It is stdlib-only (`ctypes` against
+Homebrew's `libusb`), so the dashboard and `esp32tx_ctl.py` use it on the system
+`python3`, and `deploy.sh` copies it next to `serve.py`.
+
+Such a board appears everywhere under a topology-based name,
+**`ch340:<bus>-<port path>`** (e.g. `ch340:0-1.2`) — stable for a given USB socket,
+and accepted wherever a `/dev/cu.*` path is:
+
+```bash
+tools/ch340_usb.py list                 # which bridges are attached
+tools/flash.sh                          # autodetects them along with /dev ports
+tools/esp32tx_ctl.py send --port ch340:0-1.2 "ch 11"
+tools/ch340_usb.py reset ch340:0-1.2    # reboot the board and print its boot log
+```
+
+Flashing goes through `ch340_usb.py esptool`, which enters the bootloader itself
+and hands esptool a pyserial-compatible port. `idf.py monitor` cannot attach to
+these ports; `flash.sh --monitor` prints the boot log instead. As with a tty, only
+one process can hold a bridge — a second gets "access denied (held by another
+process)".
 
 **Identifying boards.** The `/dev` name can shift between plug-ins; the **MAC is
 the stable identity**, and the dashboard shows it. Several boards can share one Mac
@@ -137,8 +181,8 @@ entry at all. Use a data cable.
 
 ## Prerequisites
 
-**ESP-IDF v5.1+, target esp32c6 — installed at `~/esp/esp-idf` (currently
-v5.5.5)**, with the RISC-V toolchain under `~/.espressif`.
+**ESP-IDF v5.1+, targets esp32c6 / esp32s3 — installed at `~/esp/esp-idf` (currently
+v5.5.5)**, with the RISC-V (C6) and Xtensa (S3) toolchains under `~/.espressif`.
 
 That install is **shared by every ESP project on this machine**. Nothing is
 vendored into this repo, and new projects should point at the same copy rather than
@@ -155,7 +199,7 @@ Override the location with `IDF_DIR=/path/to/esp-idf`. If IDF is missing entirel
 
 `tools/flash.sh` sources `idf_env.sh` itself, so it works from a cold shell.
 
-The **host tools need nothing but the system `python3`** — `esp32c6_ctl.py` and the
+The **host tools need nothing but the system `python3`** — `esp32tx_ctl.py` and the
 dashboard talk to the tty through stdlib `termios`. No venv, no pip, no pyserial.
 
 ---
@@ -166,7 +210,7 @@ From `firmware/`, with IDF activated:
 
 ```bash
 . ../tools/idf_env.sh
-idf.py set-target esp32c6
+idf.py set-target esp32c6        # or esp32s3
 idf.py build
 idf.py -p /dev/cu.usbmodemXXXX flash monitor
 ```
@@ -191,14 +235,14 @@ differentiates them. Plug in all the boards, then:
 
 ```bash
 # What's connected, and each board's current state:
-tools/esp32c6_ctl.py list
+tools/esp32tx_ctl.py list
 
 # Round-robin channels 1, 6, 11 across however many boards are present,
 # 100% duty, 20 dBm, and start transmitting:
-tools/esp32c6_ctl.py assign --channels 1,6,11 --duty 100 --pwr 20
+tools/esp32tx_ctl.py assign --channels 1,6,11 --duty 100 --pwr 20
 
 # Bursty emitter (20% on-air), for exercising a receiver's burst gate:
-tools/esp32c6_ctl.py assign --channels 6 --duty 20
+tools/esp32tx_ctl.py assign --channels 6 --duty 20
 ```
 
 `assign` walks the detected ports in order and hands out the channel list
@@ -210,10 +254,11 @@ to specific ports, pass `--port` (repeatable) in the order you want.
 ## Runtime control (serial commands)
 
 The firmware runs a line REPL (`beesdr-tx>`) on the console. Type these in
-`idf.py monitor`, send them with `esp32c6_ctl.py send`, or use the dashboard:
+`idf.py monitor`, send them with `esp32tx_ctl.py send`, or use the dashboard:
 
 | Command | Effect |
 |---|---|
+| `mode <wifi\|ble>` | Radio personality. Saved, then the board **reboots** (~1 s) into it. |
 | `ch <1-14>` | Set channel. SSID and DS-parameter IE track it. |
 | `duty <0-100>` | On-air percent of a 100 ms window. 100 = continuous, lower = bursty. |
 | `pwr <2-20>` | Max TX power, dBm. |
@@ -241,18 +286,68 @@ every rate then returns `ESP_FAIL` (seen on hardware). Calling it on the running
 interface works. A failure shows up as `rate_err=<IDF error>` in `status` and in red
 next to the PHY selector in the dashboard.
 
+### Bluetooth LE mode
+
+The chip has one 2.4 GHz radio, so WiFi and BLE are alternatives, not layers.
+`mode ble` stores the choice and restarts the firmware with only the BLE stack
+(NimBLE, broadcaster-only) running; `mode wifi` goes back. Time-slicing the two
+through coexistence would chop both waveforms, which is the opposite of what a
+signal source is for. `tx`, `duty`, `led` and `status` work in both modes, and
+BLE settings can be changed while in WiFi mode (they apply on the next switch).
+
+| Command | Effect |
+|---|---|
+| `ble <adv\|ext\|dtm>` | What to transmit (table below). |
+| `phy <1m\|2m\|s8\|s2>` | PHY for `ext` and `dtm`. `adv` is always LE 1M. |
+| `advch <all\|37,38,39>` | Advertising channels used by `adv` / `ext` (2402 / 2426 / 2480 MHz). |
+| `itvl <20-10240>` | Advertising interval, ms (`adv` / `ext`). |
+| `bch <0-39>` | `dtm` RF channel; frequency = 2402 + 2·n MHz. |
+| `pat <name>` | `dtm` payload: `prbs9 prbs15 11110000 00001111 10101010 01010101 ones zeros`. |
+| `len <0-255>` | `dtm` payload bytes; for `ext`, total advertising-data bytes (padded, max 251). |
+| `bpwr <dBm>` | BLE TX power, snapped down to a 3 dB step. C6: −15…+20, S3: −24…+20. |
+
+| `ble` | Standard | On air | Seen by a phone? |
+|---|---|---|---|
+| `adv` | **Bluetooth 4** legacy advertising | `ADV_NONCONN_IND`, LE 1M, on the chosen advertising channels, once per interval | Yes, as `BEESDR-TX-xxxx` |
+| `ext` | **Bluetooth 5** extended advertising | `ADV_EXT_IND` on the advertising channels + `AUX_ADV_IND` on a data channel the controller picks. `1m`: 1M/1M · `2m`: primary 1M, secondary 2M · `s8` / `s2`: **Coded PHY** on both | BT5 scanners only; Coded needs long-range support |
+| `dtm` | Direct Test Mode (LE Transmitter Test v2) | Back-to-back test packets on **one fixed RF channel**, LE 1M / 2M / Coded S=8 / Coded S=2. `duty` gates it in 100 ms windows | No — it is not advertising |
+
+Advertising is inherently low duty (a sub-millisecond burst per channel per
+interval). **For a steady emitter the SDR can lock onto, use `dtm`.**
+
+`status` adds `mode`, `ble`, `bphy`, `coding`, `bch`, `advch`, `itvl`, `bpwr`,
+`pat`, `len`, `ble_state` (`off idle adv dtm error`), `ble_err`, `name`, `bmac`.
+
+- **Coded S=2 vs S=8 while advertising** can only be chosen with the BT 5.4
+  "Set Extended Advertising Parameters v2" command. The firmware tries it and falls
+  back to the controller's default; `coding=ctrl` in `status` means the controller
+  picked (normally S=8). **The ESP32-S3 controller reports `ctrl`** (measured
+  2026-11-14); the C6 is untested. In `dtm` the coding is always exactly what you ask for.
+- 2M is never used on the primary advertising channels — the spec does not allow it.
+- The C6 controller builds DTM out by default; `firmware/sdkconfig.defaults.esp32c6`
+  turns it on.
+- WiFi + BLE needs the 1.5 MB app slot (`CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE`).
+  NVS keeps its offset, so saved settings survive reflashing from an older build.
+
+```bash
+tools/esp32tx_ctl.py mode ble                 # every board; --port to pick one
+tools/esp32tx_ctl.py send "ble dtm"
+tools/esp32tx_ctl.py send "phy s8"
+tools/esp32tx_ctl.py send "bch 19"            # 2440 MHz
+```
+
 ### Settings persist across power cycles
 
-Every accepted `ch` / `duty` / `pwr` / `rate` / `tx` / `led` command is saved to NVS
+Every accepted `mode` / `ch` / `duty` / `pwr` / `rate` / `tx` / `led` / BLE command is saved to NVS
 flash right away and restored at boot. **A board unplugged from the Mac and powered
 from any USB supply comes back up transmitting exactly what it was last set to**,
-with no host involved. The dashboard (or `esp32c6_ctl.py`) is only needed to *change*
+with no host involved. The dashboard (or `esp32tx_ctl.py`) is only needed to *change*
 settings. Erasing flash (`idf.py erase-flash`) returns a board to the defaults
 (ch 6, 100 %, 20 dBm, `6m`, TX on).
 
 ```bash
-tools/esp32c6_ctl.py send --port /dev/cu.usbmodem101 "ch 11"
-tools/esp32c6_ctl.py status
+tools/esp32tx_ctl.py send --port /dev/cu.usbmodem101 "ch 11"
+tools/esp32tx_ctl.py status
 ```
 
 ---
@@ -265,7 +360,7 @@ plugging one in is all it takes.
 
 ### It is always running
 
-The dashboard is installed as a macOS **LaunchAgent**, `com.beesdr.esp32c6-dashboard`:
+The dashboard is installed as a macOS **LaunchAgent**, `com.beesdr.esp32tx-dashboard`:
 
 - `RunAtLoad` — starts at login
 - `KeepAlive` — restarted automatically if it exits
@@ -276,8 +371,8 @@ There is nothing to launch, and it survives reboots. To check on it:
 
 ```bash
 dashboard/deploy.sh --status
-launchctl print "gui/$(id -u)/com.beesdr.esp32c6-dashboard"
-tail -f ~/Library/Logs/beesdr-esp32c6-dashboard.error.log
+launchctl print "gui/$(id -u)/com.beesdr.esp32tx-dashboard"
+tail -f ~/Library/Logs/beesdr-esp32tx-dashboard.error.log
 ```
 
 `serve.py` defaults to `--host 0.0.0.0` (reachable from a phone on the same LAN),
@@ -296,7 +391,7 @@ can't open file '.../dashboard/serve.py': [Errno 1] Operation not permitted
 ```
 
 `~/Library/Application Support/` is outside TCC, so the service runs from a copy at
-`~/Library/Application Support/BEESDR/ESP32C6-dashboard/`.
+`~/Library/Application Support/BEESDR/ESP32Tx-dashboard/`.
 
 **This repo is the source of truth; that copy is a deployment artifact.** Editing
 `serve.py` or `index.html` here changes nothing until you deploy:
@@ -317,7 +412,7 @@ dashboard/dashboard.sh --host 127.0.0.1 --port 9000   # somewhere else
 ```
 
 Stop the service first, or use a different port — **one process per serial port**.
-The same applies to `esp32c6_ctl.py`: it cannot drive a board the running dashboard
+The same applies to `esp32tx_ctl.py`: it cannot drive a board the running dashboard
 is holding.
 
 ### HTTP API
@@ -335,6 +430,12 @@ The UI is a thin client over this; it is equally usable from `curl` or a script.
 Settable fields, applied in this order and silently skipped when out of range:
 `ch` (1–14), `duty` (0–100), `pwr` (2–20), `rate` (one of the names above), `tx`
 (`true` / `"on"` / `1` → on, anything else → off), `led` (`#rrggbb`, `/api/set` only).
+
+`mode` (`"wifi"` / `"ble"`) is applied first and waits for the board to reboot. BLE
+fields: `ble`, `bphy`, `bch`, `advch` (list, e.g. `[37,39]`), `itvl`, `bpwr`, `pat`,
+`len` — same values as the serial commands. In the UI each card has a
+**WiFi | Bluetooth LE** switch under its header; **All WiFi** / **All BLE** in the
+top bar switch every board.
 
 **Board colours.** Click the round swatch at the top-left of a card to pick that
 board's LED colour. The choice is stored on the board (NVS) *and* in
@@ -395,7 +496,7 @@ channel.
 - **`duty=100` is ~99% on-air**, not 100 — one 1 ms scheduler yield per 100 ms
   window keeps the watchdog and idle task alive. Irrelevant for RF purposes.
 - **One port = one board, one process.** The dashboard service holds every port it
-  finds; stop it before flashing or before using `esp32c6_ctl.py`.
+  finds; stop it before flashing or before using `esp32tx_ctl.py`.
 - **The dashboard has no authentication.** Keep it on `127.0.0.1` unless you have a
   reason not to.
 - **A charge-only USB cable** lights the LED and enumerates nothing.
@@ -406,6 +507,13 @@ channel.
 
 Firmware and tooling written 2026-08-31; split out into this standalone project on
 2026-09-06.
+
+**BLE mode added 2026-11-14.** Both targets build (C6 0x126f20, S3 0xebe10 bytes).
+Exercised on an ESP32-S3: every `ble` / `phy` / channel / power / pattern
+combination is accepted by the controller with `ble_err=0`, and legacy advertising
+was received by name on the Mac's own Bluetooth. Extended advertising and DTM have
+not been observed on air yet (macOS does not report non-connectable extended
+advertising), and nothing has been run on a C6.
 
 **Builds clean** against the shared ESP-IDF v5.5.5 (verified 2026-09-06):
 `beesdr_wifi_tx.bin`, 0xdb610 bytes, 14% free in the app partition. The dashboard

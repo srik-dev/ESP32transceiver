@@ -1,0 +1,5 @@
+# ESP32-C6 overrides, applied on top of sdkconfig.defaults.
+
+# The C6 BLE controller builds Direct Test Mode out by default (the S3's has it
+# on). `ble dtm` — the fixed-channel test carrier — needs it.
+CONFIG_BT_LE_DTM_ENABLED=y

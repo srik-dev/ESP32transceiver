@@ -2,7 +2,7 @@
 # deploy.sh — push this dashboard to the always-on background service.
 #
 # WHY A COPY EXISTS. The dashboard runs as a macOS LaunchAgent
-# (com.beesdr.esp32c6-dashboard) so it is up whenever you log in. launchd-spawned
+# (com.beesdr.esp32tx-dashboard) so it is up whenever you log in. launchd-spawned
 # processes get no TCC grant for ~/Documents, so a plist pointing straight at this
 # folder dies on every start with:
 #
@@ -16,8 +16,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNTIME="$HOME/Library/Application Support/BEESDR/ESP32C6-dashboard"
-LABEL="com.beesdr.esp32c6-dashboard"
+RUNTIME="$HOME/Library/Application Support/BEESDR/ESP32Tx-dashboard"
+LABEL="com.beesdr.esp32tx-dashboard"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 PORT=8760
 
@@ -30,7 +30,7 @@ status() {
   if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/"; then
     echo "http    : responding on http://127.0.0.1:$PORT/"
   else
-    echo "http    : no response on $PORT — check ~/Library/Logs/beesdr-esp32c6-dashboard.error.log"
+    echo "http    : no response on $PORT — check ~/Library/Logs/beesdr-esp32tx-dashboard.error.log"
   fi
 }
 
@@ -43,7 +43,8 @@ if [ ! -f "$PLIST" ]; then
 fi
 
 mkdir -p "$RUNTIME"
-cp "$HERE/serve.py" "$HERE/index.html" "$HERE/dashboard.sh" "$RUNTIME"/
+cp "$HERE/serve.py" "$HERE/index.html" "$HERE/dashboard.sh" \
+   "$HERE/../tools/ch340_usb.py" "$RUNTIME"/
 chmod +x "$RUNTIME/dashboard.sh"
 echo "synced -> $RUNTIME"
 

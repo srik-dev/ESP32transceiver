@@ -1,30 +1,40 @@
 #!/usr/bin/env python3
 """
-esp32c6_ctl.py — enumerate BEESDR ESP32-C6 TX boards and tune each to a WiFi
-channel over its USB-Serial-JTAG console.
+esp32tx_ctl.py — enumerate BEESDR ESP32-Tx boards (ESP32-C6 / ESP32-S3) and tune
+each to a WiFi channel over its serial console.
 
 Pure Python stdlib — no pyserial. The C6 exposes the console as a USB-CDC
 device, so the baud rate is irrelevant; we open /dev/cu.usbmodem* directly,
 put the tty in raw mode with the stdlib `termios`, and exchange the firmware's
 line-oriented commands (ch / duty / pwr / rate / tx / status).
 
+Boards on a CH340 bridge macOS has no driver for (CH340K, 1a86:7522) have no
+/dev entry; they are reached through tools/ch340_usb.py (libusb) and show up as
+ports named ch340:<bus>-<port path>.
+
 Run from the repo root (the project convention), though this tool writes
 nothing under Experiments/ so it is path-agnostic.
 
 Examples:
     # See which boards are plugged in
-    tools/esp32c6_ctl.py list
+    tools/esp32tx_ctl.py list
 
     # Round-robin channels 1,6,11 across every detected board, 100% duty, 20 dBm,
     # then turn TX on and print each board's status:
-    tools/esp32c6_ctl.py assign --channels 1,6,11 --duty 100 --pwr 20
+    tools/esp32tx_ctl.py assign --channels 1,6,11 --duty 100 --pwr 20
 
     # Bursty emitter to exercise the AoA burst gate:
-    tools/esp32c6_ctl.py assign --channels 6 --duty 20
+    tools/esp32tx_ctl.py assign --channels 6 --duty 20
 
     # One-off command to one board:
-    tools/esp32c6_ctl.py send --port /dev/cu.usbmodem101 "ch 11"
-    tools/esp32c6_ctl.py status
+    tools/esp32tx_ctl.py send --port /dev/cu.usbmodem101 "ch 11"
+    tools/esp32tx_ctl.py status
+
+    # Flip every board (or --port ones) to Bluetooth LE and back. The board
+    # saves the mode and reboots into it (~1 s):
+    tools/esp32tx_ctl.py mode ble
+    tools/esp32tx_ctl.py send "ble dtm"      # then: phy s8 / bch 19 / bpwr 9 ...
+    tools/esp32tx_ctl.py mode wifi
 """
 import argparse
 import glob
@@ -33,9 +43,12 @@ import sys
 import termios
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ch340_usb
+
 
 def find_ports(explicit=None):
-    """Candidate ESP32-C6 console ports. macOS names the native USB-Serial-JTAG
+    """Candidate ESP32 console ports. macOS names the native USB-Serial-JTAG
     /dev/cu.usbmodem*; USB-UART bridge kits show as /dev/cu.usbserial* or
     /dev/cu.wchusbserial*. Bluetooth and the debug-console pseudo-ports are
     excluded."""
@@ -46,6 +59,7 @@ def find_ports(explicit=None):
     ports = []
     for p in pats:
         ports.extend(glob.glob(p))
+    ports.extend(ch340_usb.list_ports())
     ports = [p for p in ports
              if "Bluetooth" not in p and "debug-console" not in p]
     return sorted(set(ports))
@@ -98,6 +112,18 @@ def _read_for(fd, seconds):
 
 def send_cmd(port, cmd, wait=0.4, quiet=False):
     """Send one command line, return the board's response text."""
+    if ch340_usb.is_port(port):
+        dev = ch340_usb.CH340(port)
+        dev.open()
+        try:
+            dev.write(b"\r\n")
+            time.sleep(0.05)
+            dev.flush_input()
+            dev.write((cmd + "\r\n").encode())
+            resp = dev.read_for(wait)
+        finally:
+            dev.close()
+        return _report(resp, cmd, quiet)
     fd = open_port(port)
     try:
         # nudge the REPL to a fresh prompt, then flush its echo
@@ -108,6 +134,10 @@ def send_cmd(port, cmd, wait=0.4, quiet=False):
         resp = _read_for(fd, wait)
     finally:
         os.close(fd)
+    return _report(resp, cmd, quiet)
+
+
+def _report(resp, cmd, quiet):
     if not quiet:
         for line in resp.splitlines():
             line = line.strip()
@@ -119,7 +149,7 @@ def send_cmd(port, cmd, wait=0.4, quiet=False):
 def cmd_list(args):
     ports = find_ports(args.port)
     if not ports:
-        print("No ESP32-C6 console ports found "
+        print("No ESP32 console ports found "
               "(looked for /dev/cu.usbmodem*, usbserial*, wchusbserial*).")
         print("Is a board plugged in and its USB driver present?")
         return 1
@@ -141,7 +171,7 @@ def cmd_send(args):
         return 1
     for p in ports:
         print(p + ":")
-        send_cmd(p, args.command, wait=args.wait)
+        send_cmd(p, args.command, wait=getattr(args, "wait", 0.4))
     return 0
 
 
@@ -150,10 +180,26 @@ def cmd_status(args):
     return cmd_send(args)
 
 
+def cmd_mode(args):
+    """Switch radio personality. The firmware reboots into the new mode, so
+    wait for its console to come back before reading the status."""
+    ports = find_ports(args.port)
+    if not ports:
+        print("No ports found.")
+        return 1
+    for p in ports:
+        print(p + ":")
+        resp = send_cmd(p, "mode %s" % args.mode, wait=0.4)
+        if "rebooting" in resp:
+            time.sleep(1.5)
+        send_cmd(p, "status", wait=0.5)
+    return 0
+
+
 def cmd_assign(args):
     ports = find_ports(args.port)
     if not ports:
-        print("No ESP32-C6 ports found — nothing to assign.")
+        print("No ESP32 ports found — nothing to assign.")
         return 1
     channels = [int(c) for c in args.channels.split(",") if c.strip()]
     if not channels:
@@ -198,6 +244,9 @@ def main():
 
     sub.add_parser("status", help="print status from all (or --port) boards")
 
+    sm = sub.add_parser("mode", help="switch boards between WiFi and BLE (reboots them)")
+    sm.add_argument("mode", choices=["wifi", "ble"])
+
     sa = sub.add_parser("assign",
                         help="round-robin channels across boards and start TX")
     sa.add_argument("--channels", required=True,
@@ -216,10 +265,15 @@ def main():
         return cmd_send(args)
     if args.cmd == "status":
         return cmd_status(args)
+    if args.cmd == "mode":
+        return cmd_mode(args)
     if args.cmd == "assign":
         return cmd_assign(args)
     return 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except OSError as e:
+        sys.exit("%s" % e)

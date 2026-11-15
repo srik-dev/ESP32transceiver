@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-serve.py — local web dashboard to control BEESDR ESP32-C6 WiFi transmitters.
+serve.py — local web dashboard to control BEESDR ESP32-Tx WiFi / BLE transmitters (ESP32-C6 / ESP32-S3).
 
-Runs a small HTTP server on this Mac that owns each connected C6 board's USB
-serial port and drives the firmware's console commands (ch / duty / pwr / rate /
-tx / status). Open the printed URL in a browser to pick a 2.4 GHz channel per
-device, set duty cycle / power / rate, and start or stop injection. Boards are
+Runs a small HTTP server on this Mac that owns each connected board's USB
+serial port and drives the firmware's console commands (mode / ch / duty / pwr /
+rate / tx / status, plus ble / phy / bch / advch / itvl / bpwr / pat / len in BLE
+mode). Open the printed URL in a browser to flip a board between WiFi and BLE,
+pick its channel, PHY, duty cycle and power, and start or stop transmitting. Boards are
 hot-plug: plug one into a USB hub and its card appears within ~1 s; unplug it and
 it drops off.
 
-Pure Python standard library — no pyserial, no Flask, no pip. The C6 talks over
+Pure Python standard library — no pyserial, no Flask, no pip. The boards talk over
 a USB-CDC / USB-UART bridge where the baud rate is irrelevant, so we open
 /dev/cu.* directly and put it in raw mode with stdlib termios.
 
-Why USB and not WiFi: the ESP32-C6 is a single-radio, 2.4 GHz-only chip. It
+Why USB and not WiFi: the ESP32-C6/S3 is a single-radio, 2.4 GHz-only chip. It
 cannot join a 5 GHz network, and even on 2.4 GHz it cannot stay associated to an
 AP while injecting on a chosen channel (injection retunes the radio off the AP's
 channel). USB is the correct control path; put several boards on one USB hub to
@@ -26,7 +27,7 @@ Usage:
     python3 serve.py --port 9000
 
 Serial-port contention: only one process may hold a port. Do NOT run
-tools/esp32c6_ctl.py at the same time as this server.
+tools/esp32tx_ctl.py at the same time as this server.
 """
 import argparse
 import glob
@@ -41,6 +42,15 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Userspace driver for CH340 bridges macOS has no kernel driver for (no /dev/cu.*
+# entry). Sits next to serve.py in the deployed copy, in ../tools in the repo.
+# Optional: without it (or without libusb) those boards are simply not listed.
+sys.path[:0] = [HERE, os.path.join(HERE, "..", "tools")]
+try:
+    import ch340_usb
+except ImportError:
+    ch340_usb = None
 
 # Physical board colour by MAC — drives the on-board WS2812 and the UI tag.
 # The dashboard re-applies this on every connect, so it survives the
@@ -117,6 +127,8 @@ def find_ports():
     ports = []
     for p in pats:
         ports.extend(glob.glob(p))
+    if ch340_usb:
+        ports.extend(ch340_usb.list_ports())      # "ch340:<bus>-<port path>"
     return sorted(set(p for p in ports
                       if "Bluetooth" not in p and "debug-console" not in p))
 
@@ -137,6 +149,7 @@ class Device:
     def __init__(self, port):
         self.port = port
         self.fd = None
+        self.usb = None             # ch340_usb.CH340 when port is "ch340:..."
         self.lock = threading.Lock()
         self.open_error = None
         self.is_ours = False
@@ -147,11 +160,17 @@ class Device:
         self._last_ok = None
         self._last_ok_t = None
         self._led_fallback = None   # hex sent via `led rgb` to old firmware
+        self._misses = 0            # consecutive status polls with no reply
         self._stop = threading.Event()
         self._thread = None
 
     # ---- lifecycle ----
     def open(self):
+        if ch340_usb and ch340_usb.is_port(self.port):
+            usb = ch340_usb.CH340(self.port)
+            usb.open()
+            self.usb = usb
+            return
         fd = os.open(self.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         try:
             a = termios.tcgetattr(fd)
@@ -176,6 +195,10 @@ class Device:
 
     def close(self):
         self._stop.set()
+        with self.lock:
+            if self.usb is not None:
+                self.usb.close()
+                self.usb = None
         if self.fd is not None:
             try:
                 os.close(self.fd)
@@ -203,6 +226,11 @@ class Device:
         buf = bytearray()
         while time.time() < end:
             try:
+                if self.usb is not None:
+                    c = self.usb.read(4096, 20)
+                    if c:
+                        buf.extend(c)
+                    continue
                 c = os.read(self.fd, 4096)
             except BlockingIOError:
                 c = b""
@@ -216,6 +244,13 @@ class Device:
 
     def exchange(self, cmd, wait=0.4):
         with self.lock:
+            if self.usb is not None:
+                try:
+                    self.usb.flush_input()
+                    self.usb.write((cmd + "\r\n").encode())
+                except OSError:
+                    return ""
+                return self._read_for(wait)
             if self.fd is None:
                 return ""
             try:
@@ -234,6 +269,7 @@ class Device:
         now = time.time()
         if line:
             self.is_ours = True
+            self._misses = 0
             self.raw = line.strip()
             self.status = parse_status(line)
             self.last_seen = now
@@ -241,6 +277,7 @@ class Device:
                 ok = int(self.status.get("frames_ok", "0"))
                 if self._last_ok is not None and now > (self._last_ok_t or 0):
                     dt = now - self._last_ok_t
+                    # the counter restarts from 0 when a mode switch reboots the board
                     self.fps = max(0.0, (ok - self._last_ok) / dt)
                 self._last_ok, self._last_ok_t = ok, now
             except ValueError:
@@ -251,7 +288,11 @@ class Device:
                     and self._led_fallback != desired):
                 self.set_led(desired)
         else:
-            self.is_ours = False
+            # A mode switch reboots the board (~1 s of boot log instead of a
+            # STATUS line); don't drop its card over a couple of missed polls.
+            self._misses += 1
+            if self._misses >= 4:
+                self.is_ours = False
 
     def set_led(self, colour):
         """Send a named or '#rrggbb' colour. Firmware older than the hex `led`
@@ -280,6 +321,8 @@ class Device:
             "is_ours": self.is_ours,
             "open_error": self.open_error,
             "mac": s.get("mac", ""),
+            # firmware older than the S3 port has no chip= and is always a C6
+            "chip": s.get("chip", "esp32c6" if s else ""),
             "ch": geti("ch"),
             "freq": chan_freq(geti("ch")) if s.get("ch") else None,
             "duty": geti("duty"),
@@ -297,6 +340,24 @@ class Device:
             # (old firmware can only report led=rgb, which has no hex)
             "color": to_hex(s.get("led", ""))
                      or to_hex(desired_led(s.get("mac", ""))),
+            # ---- WiFi / BLE personality. Firmware older than BLE support has
+            # no mode= field: it is WiFi-only and the UI hides the switch.
+            "mode": s.get("mode", "wifi"),
+            "has_ble": "mode" in s,
+            "ble": s.get("ble", ""),              # adv | ext | dtm
+            "bphy": s.get("bphy", ""),            # 1m | 2m | s8 | s2
+            "coding": s.get("coding", "-"),       # coded PHY actually on air: s8|s2|ctrl|-
+            "bch": geti("bch"),                   # DTM RF channel 0-39
+            "advch": [int(c) for c in s.get("advch", "").split(",") if c.isdigit()],
+            "itvl": geti("itvl"),
+            "bpwr": geti("bpwr"),
+            "bpwr_min": geti("bpwr_min", -15),
+            "pat": s.get("pat", ""),
+            "len": geti("len"),
+            "ble_state": s.get("ble_state", ""),
+            "ble_err": s.get("ble_err", "0"),
+            "name": s.get("name", ""),
+            "bmac": s.get("bmac", ""),
             "fps": round(self.fps, 1),
             "age": round(time.time() - self.last_seen, 1) if self.last_seen else None,
         }
@@ -342,9 +403,53 @@ VALID_RATES = ({"1m", "2m", "5m", "11m",                                  # 802.
                | {"he-mcs%d" % i for i in range(10)})                      # 802.11ax HE20
 
 
+BLE_KINDS = {"adv", "ext", "dtm"}
+BLE_PHYS = {"1m", "2m", "s8", "s2"}
+BLE_PATTERNS = {"prbs9", "11110000", "10101010", "prbs15", "ones", "zeros",
+                "00001111", "01010101"}
+
+
+def apply_ble(dev, body, out):
+    if "ble" in body and str(body["ble"]) in BLE_KINDS:
+        out.append(dev.exchange("ble %s" % body["ble"], 0.3))
+    if "bphy" in body and str(body["bphy"]) in BLE_PHYS:
+        out.append(dev.exchange("phy %s" % body["bphy"], 0.3))
+    if "bch" in body and 0 <= int(body["bch"]) <= 39:
+        out.append(dev.exchange("bch %d" % int(body["bch"]), 0.3))
+    if "advch" in body:
+        chans = sorted({int(c) for c in body["advch"]} & {37, 38, 39})
+        if chans:
+            out.append(dev.exchange("advch %s" % ",".join(map(str, chans)), 0.3))
+    if "itvl" in body and 20 <= int(body["itvl"]) <= 10240:
+        out.append(dev.exchange("itvl %d" % int(body["itvl"]), 0.3))
+    if "bpwr" in body and -24 <= int(body["bpwr"]) <= 20:
+        out.append(dev.exchange("bpwr %d" % int(body["bpwr"]), 0.3))
+    if "pat" in body and str(body["pat"]) in BLE_PATTERNS:
+        out.append(dev.exchange("pat %s" % body["pat"], 0.3))
+    if "len" in body and 0 <= int(body["len"]) <= 255:
+        out.append(dev.exchange("len %d" % int(body["len"]), 0.3))
+
+
 def apply_settings(dev, body):
     """Apply provided fields to a device in a sensible order; return responses."""
     out = []
+    if "mode" in body:
+        mode = str(body["mode"])
+        if mode not in ("wifi", "ble"):
+            raise ValueError("mode must be wifi or ble")
+        if not dev.as_dict()["has_ble"]:
+            raise ValueError("firmware has no BLE mode - reflash with tools/flash.sh")
+        resp = dev.exchange("mode %s" % mode, 0.3)
+        out.append(resp)
+        if "rebooting" in resp:
+            # the board restarts into the other radio stack; wait for its console
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                time.sleep(0.4)
+                dev.refresh()
+                if dev.status.get("mode") == mode and dev._misses == 0:
+                    break
+    apply_ble(dev, body, out)
     # pause first if channel is changing and tx is being (re)started, so the
     # firmware applies cleanly — but the firmware handles live changes anyway.
     if "ch" in body:
@@ -380,7 +485,7 @@ def apply_settings(dev, body):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "beesdr-esp32c6/1.0"
+    server_version = "beesdr-esp32tx/1.0"
 
     def log_message(self, fmt, *args):
         pass  # quiet
@@ -439,7 +544,10 @@ class Handler(BaseHTTPRequestHandler):
             applied = []
             for d in [x for x in (MGR.get(p["port"]) for p in MGR.snapshot()) if x]:
                 if d.is_ours:
-                    apply_settings(d, body)
+                    try:
+                        apply_settings(d, body)
+                    except (ValueError, OSError):
+                        continue        # e.g. a WiFi-only board asked for BLE
                     applied.append(d.port)
             self._send(200, {"applied": applied, "devices": MGR.snapshot()})
             return
@@ -469,7 +577,7 @@ def lan_ip():
 
 
 def main():
-    ap = argparse.ArgumentParser(description="BEESDR ESP32-C6 WiFi TX dashboard")
+    ap = argparse.ArgumentParser(description="BEESDR ESP32-Tx WiFi TX dashboard")
     ap.add_argument("--host", default="0.0.0.0",
                     help="bind address (default 0.0.0.0 = reachable on the LAN; "
                          "use 127.0.0.1 to restrict to this Mac)")
@@ -495,7 +603,7 @@ def main():
         print("    pkill -f serve.py")
         print("or run on another port:  python3 serve.py --port 8761")
         sys.exit(1)
-    print("BEESDR ESP32-C6 dashboard serving:")
+    print("BEESDR ESP32-Tx dashboard serving:")
     print("  http://127.0.0.1:%d" % args.port)
     if args.host == "0.0.0.0":
         ip = lan_ip()

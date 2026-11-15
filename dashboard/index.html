@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BEESDR ESP32-C6 WiFi TX Control</title>
+<title>BEESDR ESP32-Tx WiFi / BLE TX Control</title>
 <style>
   :root{
     --bg:#0e1116; --panel:#161b22; --panel2:#1c232d; --line:#2a3441;
@@ -94,7 +94,30 @@
   .phy-g {color:#7ee787;border-color:#7ee78766;background:#7ee78718}
   .phy-n {color:#79c0ff;border-color:#79c0ff66;background:#79c0ff18}
   .phy-ax{color:#d2a8ff;border-color:#d2a8ff66;background:#d2a8ff18}
+  .phy-ble{color:#56d4dd;border-color:#56d4dd66;background:#56d4dd18}
   .phy-err{color:var(--err);font-size:11px}
+  /* WiFi | BLE quick switch + the sections it shows/hides */
+  .seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:0;
+    border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--panel2)}
+  .seg button{background:none;border:0;border-right:1px solid var(--line);color:var(--dim);
+    padding:8px 6px;font-size:13px;font-weight:600;cursor:pointer;transition:.12s}
+  .seg button:last-child{border-right:0}
+  .seg button:hover{color:var(--txt)}
+  .seg button.sel{background:var(--accent2);color:#fff}
+  .seg.ble button.sel{background:#1b7f88}
+  .seg small{display:block;font-weight:400;font-size:10.5px;opacity:.8}
+  .card.switching .modesw{opacity:.55;pointer-events:none}
+  .sect{display:flex;flex-direction:column;gap:14px}
+  .card[data-mode=wifi] .ble-only,.card[data-mode=ble] .wifi-only{display:none}
+  .card[data-kind=dtm] .adv-only,.card:not([data-kind=dtm]) .dtm-only{display:none}
+  .card[data-kind=adv] .notadv{display:none}
+  .card[data-mode=ble]:not([data-kind=dtm]) .duty-blk{display:none}
+  .card:not([data-ble]) .modesw{display:none}
+  .rf-grid{display:grid;grid-template-columns:repeat(10,1fr);gap:4px}
+  .rf-grid .chan{padding:6px 0;font-size:12px;border-radius:6px}
+  .adv3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+  .adv3 .chan small{display:block;font-weight:400;font-size:10.5px;opacity:.75}
+  .hint{font-size:11.5px;color:var(--dim);line-height:1.45}
   .legend{font-size:11px;color:var(--dim)}
   .legend .d{display:inline-block;width:6px;height:6px;border-radius:50%;
     background:var(--accent);margin-right:5px;vertical-align:middle}
@@ -102,10 +125,12 @@
 </head>
 <body>
 <header>
-  <h1>🐝 BEESDR ESP32-C6 <span style="color:var(--dim);font-weight:400">WiFi TX Control</span></h1>
+  <h1>🐝 BEESDR ESP32-Tx <span style="color:var(--dim);font-weight:400">WiFi / BLE TX Control</span></h1>
   <span class="pill">devices <b id="devcount">0</b></span>
   <span class="pill" id="clock">—</span>
   <div class="spacer"></div>
+  <button class="btn small" onclick="allMode('wifi')" title="Switch every board to WiFi mode">All WiFi</button>
+  <button class="btn small" onclick="allMode('ble')" title="Switch every board to BLE mode">All BLE</button>
   <button class="btn small" onclick="autoPlan()" title="Assign channels 1,6,11 across the boards">Auto 1 / 6 / 11</button>
   <button class="btn small primary" onclick="allTx(true)">Start all</button>
   <button class="btn small danger" onclick="allTx(false)">Stop all</button>
@@ -125,8 +150,42 @@ const PHY_GROUPS = [
   {std:"n",  label:"802.11n · HT20 (Wi-Fi 4)",          rates:[0,1,2,3,4,5,6,7].map(i=>["mcs"+i,"MCS"+i])},
   {std:"ax", label:"802.11ax · HE20 SU (Wi-Fi 6)",      rates:[0,1,2,3,4,5,6,7,8,9].map(i=>["he-mcs"+i,"HE-MCS"+i])},
 ];
+// Standards each chip's radio can transmit; the S3 has no HE (11ax) PHY.
+const CHIP_STDS = {esp32c6:["b","g","n","ax"], esp32s3:["b","g","n"]};
+const CHIP_NAME = {esp32c6:"ESP32-C6", esp32s3:"ESP32-S3"};
+function rateOptions(chip){
+  const ok=CHIP_STDS[chip]||CHIP_STDS.esp32c6;
+  return PHY_GROUPS.filter(g=>ok.includes(g.std)).map(g=>`<optgroup label="${g.label}">${
+    g.rates.map(([v,t])=>`<option value="${v}">${g.std} · ${t}</option>`).join("")}</optgroup>`).join("");
+}
 const STD_OF = {};
 PHY_GROUPS.forEach(g=>g.rates.forEach(([v])=>STD_OF[v]=g.std));
+// ---- BLE ----
+const BLE_KINDS = [["adv","Legacy adv","Bluetooth 4"],["ext","Extended adv","Bluetooth 5"],["dtm","Test carrier","DTM"]];
+const BLE_HINT = {
+  adv:"ADV_NONCONN_IND on the advertising channels, LE 1M only. Visible to any phone or BLE scanner. Low duty: one short burst per channel per interval.",
+  ext:"ADV_EXT_IND on the advertising channels plus an AUX_ADV_IND on a data channel the controller picks. Needs a BT5 scanner; Coded PHY needs one with long-range support.",
+  dtm:"Direct Test Mode: back-to-back test packets on one fixed RF channel. Not advertising, so phones do not list it — a steady, known emitter for the SDR.",
+};
+const BLE_PHYS = {
+  adv:[["1m","LE 1M · 1 Mb/s (fixed for legacy)"]],
+  ext:[["1m","LE 1M · primary 1M / secondary 1M"],["2m","LE 2M · primary 1M / secondary 2M"],
+       ["s8","LE Coded S=8 · 125 kb/s long range"],["s2","LE Coded S=2 · 500 kb/s"]],
+  dtm:[["1m","LE 1M · 1 Mb/s"],["2m","LE 2M · 2 Mb/s"],
+       ["s8","LE Coded S=8 · 125 kb/s"],["s2","LE Coded S=2 · 500 kb/s"]],
+};
+const PHY_SHORT = {"1m":"1M","2m":"2M","s8":"Coded S8","s2":"Coded S2"};
+const BLE_PATTERNS = [["prbs9","PRBS9 (pseudo-random)"],["prbs15","PRBS15 (pseudo-random)"],
+  ["11110000","11110000 repeating"],["00001111","00001111 repeating"],
+  ["10101010","10101010 repeating"],["01010101","01010101 repeating"],
+  ["ones","all ones"],["zeros","all zeros"]];
+const ADV_CH = [[37,2402],[38,2426],[39,2480]];
+const ADV_RF = new Set([0,12,39]);          // RF indices of advertising channels 37/38/39
+const ITVLS = [20,30,50,100,200,500,1000,2000,5000,10240];
+const BLE_PWR = [-24,-21,-18,-15,-12,-9,-6,-3,0,3,6,9,12,15,18,20];
+function rfFreq(i){ return 2402+2*i; }
+function itvlLabel(ms){ return ms>=1000?(ms/1000)+" s":ms+" ms"; }
+
 const cards = {};            // port -> {el, kind, update(d)}
 const edited = {};           // "port/field" -> timestamp, to avoid clobbering edits
 
@@ -154,6 +213,9 @@ async function set(port, body){
   catch(e){ setBanner("Command failed: "+e.message); }
 }
 async function allTx(on){ try{ await api("/api/all",{tx:on}); refresh(); }catch(e){ setBanner(e.message);} }
+async function allMode(m){
+  setBanner("Switching every board to "+(m==="ble"?"BLE":"WiFi")+" — each one reboots (~1 s)…");
+  try{ await api("/api/all",{mode:m}); refresh(); }catch(e){ setBanner(e.message);} }
 async function autoPlan(){
   const ours=lastState.filter(d=>d.is_ours), plan=[1,6,11];
   for(let i=0;i<ours.length;i++) await set(ours[i].port,{ch:plan[i%3]});
@@ -171,19 +233,61 @@ function buildOurs(d){
       <span class="phy v-phy"></span>
       <div class="freq"><div class="big"></div><div class="lbl"></div></div>
     </div>
-    <div>
+    <div class="seg modesw" title="Radio mode — switching reboots the board (~1 s)">
+      <button data-m="wifi">WiFi</button><button data-m="ble">Bluetooth LE</button>
+    </div>
+    <div class="wifi-only">
       <div class="section-lbl"><span>2.4 GHz channel</span>
         <span class="legend"><span class="d"></span>non-overlapping</span></div>
       <div class="chan-grid"></div>
     </div>
-    <div>
+    <div class="ble-only sect">
+      <div>
+        <div class="section-lbl"><span>BLE transmission</span></div>
+        <div class="seg ble s-kind">${BLE_KINDS.map(([v,t,sub])=>
+          `<button data-k="${v}">${t}<small>${sub}</small></button>`).join("")}</div>
+        <div class="hint v-hint" style="margin-top:7px"></div>
+      </div>
+      <div class="adv-only">
+        <div class="section-lbl"><span>Advertising channels</span></div>
+        <div class="adv3"></div>
+      </div>
+      <div class="adv-only">
+        <div class="section-lbl"><span>Advertising interval</span></div>
+        <select class="s-itvl"></select>
+      </div>
+      <div class="dtm-only">
+        <div class="section-lbl"><span>RF channel</span>
+          <span class="legend"><span class="d"></span>advertising-channel frequency</span></div>
+        <div class="rf-grid"></div>
+      </div>
+      <div class="dtm-only">
+        <div class="section-lbl"><span>Payload pattern</span></div>
+        <select class="s-pat">${BLE_PATTERNS.map(([v,t])=>`<option value="${v}">${t}</option>`).join("")}</select>
+      </div>
+      <div class="notadv">
+        <div class="section-lbl"><span class="v-lenlbl"></span></div>
+        <div class="slider-row">
+          <input type="range" min="0" max="255" class="s-len">
+          <span class="val v-len"></span>
+        </div>
+      </div>
+      <div>
+        <div class="section-lbl"><span>TX power</span></div>
+        <div class="slider-row">
+          <input type="range" min="0" max="1" step="1" class="s-bpwr">
+          <span class="val v-bpwr"></span>
+        </div>
+      </div>
+    </div>
+    <div class="duty-blk">
       <div class="section-lbl"><span>Duty cycle</span></div>
       <div class="slider-row">
         <input type="range" min="0" max="100" class="s-duty">
         <span class="val v-duty"></span>
       </div>
     </div>
-    <div>
+    <div class="wifi-only">
       <div class="section-lbl"><span>TX power</span></div>
       <div class="slider-row">
         <input type="range" min="2" max="20" class="s-pwr">
@@ -193,14 +297,19 @@ function buildOurs(d){
     <div class="row">
       <div style="flex:1">
         <div class="section-lbl"><span>PHY / standard</span><span class="phy-err v-rerr"></span></div>
-        <select class="s-rate">
-          ${PHY_GROUPS.map(g=>`<optgroup label="${g.label}">${
-            g.rates.map(([v,t])=>`<option value="${v}">${g.std} · ${t}</option>`).join("")}</optgroup>`).join("")}
-        </select>
+        <select class="s-rate wifi-only"></select>
+        <select class="s-bphy ble-only"></select>
       </div>
       <button class="btn txtoggle s-tx"></button>
     </div>
-    <div class="stats">
+    <div class="stats ble-only">
+      <div><span class="k">state</span><span class="v v-bstate"></span></div>
+      <div><span class="k">coding</span><span class="v v-coding"></span></div>
+      <div><span class="k">name</span><span class="v v-bname"></span></div>
+      <div><span class="k">last seen</span><span class="v v-bage"></span></div>
+      <div style="grid-column:1/-1"><span class="k">BLE address</span><span class="v v-bmac"></span></div>
+    </div>
+    <div class="stats wifi-only">
       <div><span class="k">throughput</span><span class="v v-fps"></span></div>
       <div><span class="k">frames sent</span><span class="v v-ok"></span></div>
       <div><span class="k">errors</span><span class="v v-err"></span></div>
@@ -216,7 +325,107 @@ function buildOurs(d){
         sRate=q(".s-rate"), sTx=q(".s-tx"), sLed=q(".s-led"),
         vFps=q(".v-fps"), vOk=q(".v-ok"), vErr=q(".v-err"), vBp=q(".v-bp"),
         vSsid=q(".v-ssid"), vAge=q(".v-age"), vPhy=q(".v-phy"), vRerr=q(".v-rerr");
+  const modeBtns=[...el.querySelectorAll(".modesw button")],
+        kindBtns=[...el.querySelectorAll(".s-kind button")],
+        vHint=q(".v-hint"), adv3=q(".adv3"), sItvl=q(".s-itvl"), rfGrid=q(".rf-grid"),
+        sPat=q(".s-pat"), sLen=q(".s-len"), vLen=q(".v-len"), vLenLbl=q(".v-lenlbl"),
+        sBpwr=q(".s-bpwr"), vBpwr=q(".v-bpwr"), sBphy=q(".s-bphy"),
+        vBstate=q(".v-bstate"), vCoding=q(".v-coding"), vBname=q(".v-bname"),
+        vBage=q(".v-bage"), vBmac=q(".v-bmac");
   const p=d.port;
+  let rateChip=null, pendingMode=null, phyKind=null, pwrMin=null, pwrLevels=BLE_PWR, last=d;
+
+  // ---- WiFi | BLE quick switch: the board saves the mode and reboots into it
+  modeBtns.forEach(b=>b.onclick=async()=>{
+    const m=b.dataset.m;
+    if(pendingMode || m===last.mode) return;
+    pendingMode=m; el.classList.add("switching"); paintMode(m);
+    await set(p,{mode:m});
+    pendingMode=null; el.classList.remove("switching");
+  });
+  function paintMode(m){
+    el.dataset.mode=m;
+    modeBtns.forEach(b=>b.classList.toggle("sel", b.dataset.m===m));
+  }
+  // ---- BLE controls
+  kindBtns.forEach(b=>b.onclick=()=>set(p,{ble:b.dataset.k}));
+  const advEls={};
+  ADV_CH.forEach(([c,f])=>{
+    const b=document.createElement("div");
+    b.className="chan"; b.innerHTML=c+"<small>"+f+" MHz</small>";
+    b.onclick=()=>{
+      const cur=new Set(last.advch||[]);
+      cur.has(c)?cur.delete(c):cur.add(c);
+      if(cur.size) set(p,{advch:[...cur]});      // at least one channel must stay on
+    };
+    adv3.appendChild(b); advEls[c]=b;
+  });
+  const rfEls=[];
+  for(let i=0;i<40;i++){
+    const b=document.createElement("div");
+    b.className="chan"+(ADV_RF.has(i)?" nonoverlap":"");
+    b.textContent=i; b.title=rfFreq(i)+" MHz";
+    b.onclick=()=>set(p,{bch:i});
+    rfGrid.appendChild(b); rfEls.push(b);
+  }
+  sItvl.onchange=()=>set(p,{itvl:+sItvl.value});
+  sPat.onchange=()=>set(p,{pat:sPat.value});
+  sBphy.onchange=()=>set(p,{bphy:sBphy.value});
+  sLen.oninput=()=>{markEdit(p,"len"); vLen.textContent=sLen.value+" B";};
+  sLen.onchange=()=>set(p,{len:+sLen.value});
+  sBpwr.oninput=()=>{markEdit(p,"bpwr"); vBpwr.textContent=pwrLevels[+sBpwr.value]+" dBm";};
+  sBpwr.onchange=()=>set(p,{bpwr:pwrLevels[+sBpwr.value]});
+
+  function updateBle(d, on){
+    const kind=d.ble||"adv";
+    el.dataset.kind=kind;
+    kindBtns.forEach(b=>b.classList.toggle("sel", b.dataset.k===kind));
+    vHint.textContent=BLE_HINT[kind]||"";
+    ADV_CH.forEach(([c])=>advEls[c].classList.toggle("sel",(d.advch||[]).includes(c)));
+    rfEls.forEach((b,i)=>b.classList.toggle("sel", i===d.bch));
+    if(!busy(p,"itvl",sItvl)){
+      const opts=ITVLS.includes(d.itvl)?ITVLS:[...ITVLS,d.itvl].sort((a,b)=>a-b);
+      if(sItvl.options.length!==opts.length)
+        sItvl.innerHTML=opts.map(v=>`<option value="${v}">${itvlLabel(v)}</option>`).join("");
+      sItvl.value=d.itvl;
+    }
+    if(!busy(p,"pat",sPat) && d.pat) sPat.value=d.pat;
+    if(kind!==phyKind){
+      phyKind=kind;
+      sBphy.innerHTML=BLE_PHYS[kind].map(([v,t])=>`<option value="${v}">${t}</option>`).join("");
+    }
+    sBphy.disabled=(kind==="adv");
+    if(!busy(p,"bphy",sBphy)) sBphy.value=(kind==="adv")?"1m":d.bphy;
+    vLenLbl.textContent=(kind==="dtm")?"Payload length":"Advertising data length";
+    if(!busy(p,"len",sLen)){ sLen.value=d.len; vLen.textContent=d.len+" B"; }
+    if(d.bpwr_min!==pwrMin){
+      pwrMin=d.bpwr_min; pwrLevels=BLE_PWR.filter(v=>v>=pwrMin); sBpwr.max=pwrLevels.length-1;
+    }
+    if(!busy(p,"bpwr",sBpwr)){
+      sBpwr.value=Math.max(0,pwrLevels.indexOf(d.bpwr)); vBpwr.textContent=d.bpwr+" dBm";
+    }
+    // header: frequency + badge
+    if(kind==="dtm"){
+      big.innerHTML=rfFreq(d.bch)+'<span style="font-size:12px;color:var(--dim)"> MHz</span>';
+      lbl.textContent="RF channel "+d.bch;
+    }else{
+      big.textContent=(d.advch||[]).join(" · ")||"—";
+      lbl.textContent="adv channels";
+    }
+    const gen=kind==="adv"?"BT4":kind==="ext"?"BT5":"DTM";
+    vPhy.textContent=gen+" · "+(kind==="adv"?"1M":PHY_SHORT[d.bphy]||d.bphy);
+    vPhy.className="phy v-phy phy-ble"; vPhy.style.display="";
+    const err=d.ble_err&&d.ble_err!=="0";
+    vRerr.textContent=err?("error: "+d.ble_err):"";
+    const live=on&&(d.ble_state==="adv"||d.ble_state==="dtm")&&!err;
+    dot.className="dot "+(!on?"off":(live?"on":"idle"));
+    vBstate.textContent={adv:"advertising",dtm:"test carrier",idle:"paused",init:"starting",
+                         error:"error",off:"—"}[d.ble_state]||d.ble_state||"—";
+    vCoding.textContent={s8:"S=8",s2:"S=2",ctrl:"controller default"}[d.coding]||"—";
+    vCoding.title=d.coding==="ctrl"?"This controller cannot select S=2/S=8 for advertising; it chose the coding itself (normally S=8).":"";
+    vBname.textContent=d.name||"—"; vBmac.textContent=d.bmac||"—";
+    vBage.textContent=d.age!=null?d.age+"s":"—";
+  }
 
   // channel buttons (built once)
   const chanEls={};
@@ -239,18 +448,28 @@ function buildOurs(d){
   sLed.onchange=()=>set(p,{led:sLed.value});
 
   function update(d){
+    last=d;
     const on=d.tx==="on", live=on&&d.fps>0;
+    if(d.has_ble) el.dataset.ble="1"; else delete el.dataset.ble;
+    const mode=pendingMode||d.mode||"wifi";
+    paintMode(mode);
+    sTx.textContent=on?"STOP TX":"START TX";
+    sTx.className="btn txtoggle "+(on?"danger":"primary");
+    sTx.dataset.on=on?"1":"0";
+    if(!busy(p,"duty",sDuty)){ sDuty.value=d.duty; vDuty.textContent=d.duty+" %"; }
     if(!busy(p,"led",sLed)){
       el.style.borderLeft = d.color ? ("4px solid "+d.color) : "";
       sLed.value = d.color || "#000000";
     }
+    id.textContent=d.mac||"ESP32";
+    const chip=CHIP_NAME[d.chip]||d.chip||"";
+    port.textContent=(chip?chip+" · ":"")+d.port; port.title=d.port;
+    if(mode==="ble"){ updateBle(d, on); return; }
     dot.className="dot "+(!on?"off":(live?"on":"idle"));
-    id.textContent=d.mac||"ESP32-C6";
-    port.textContent=d.port; port.title=d.port;
+    if(d.chip!==rateChip){ rateChip=d.chip; sRate.innerHTML=rateOptions(d.chip); }
     big.innerHTML=(d.freq?d.freq+'<span style="font-size:12px;color:var(--dim)"> MHz</span>':'—');
     lbl.textContent="channel "+(d.ch||"—");
     CHANNELS.forEach(c=>chanEls[c].classList.toggle("sel", c===d.ch));
-    if(!busy(p,"duty",sDuty)){ sDuty.value=d.duty; vDuty.textContent=d.duty+" %"; }
     if(!busy(p,"pwr",sPwr)){ sPwr.value=d.pwr; vPwr.textContent=d.pwr+" dBm"; }
     if(!busy(p,"rate",sRate) && d.rate){ sRate.value=d.rate; }
     const std=d.phy||STD_OF[d.rate]||"";
@@ -258,9 +477,6 @@ function buildOurs(d){
     vPhy.className="phy v-phy"+(std?" phy-"+std:"");
     vPhy.style.display=std?"":"none";
     vRerr.textContent=(d.rate_err&&d.rate_err!=="0")?("rejected: "+d.rate_err):"";
-    sTx.textContent=on?"STOP TX":"START TX";
-    sTx.className="btn txtoggle "+(on?"danger":"primary");
-    sTx.dataset.on=on?"1":"0";
     vFps.textContent=d.fps+" fps"; vOk.textContent=fmt(d.frames_ok);
     vErr.textContent=fmt(d.frames_err); vBp.textContent=fmt(d.bp);
     vSsid.textContent=d.ssid||"—"; vAge.textContent=d.age!=null?d.age+"s":"—";

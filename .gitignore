@@ -3,7 +3,9 @@
 # sdkconfig.defaults (which IS tracked). Never track machine-generated,
 # per-toolchain build output.
 firmware/build/
+firmware/build-*/
 firmware/sdkconfig
+firmware/sdkconfig.esp32*
 firmware/sdkconfig.old
 firmware/managed_components/
 firmware/dependencies.lock

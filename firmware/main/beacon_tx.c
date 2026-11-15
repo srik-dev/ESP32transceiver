@@ -1,7 +1,8 @@
 /*
- * beacon_tx.c — BEESDR ESP32-C6 WiFi transmitter for SDR/AoA lab work.
+ * beacon_tx.c — BEESDR ESP32 WiFi transmitter for SDR/AoA lab work.
+ * Targets: esp32c6 (b/g/n/ax) and esp32s3 (b/g/n — no HE radio).
  *
- * Puts the C6 into a raw-injection "transmitter mode": it sits on one 2.4 GHz
+ * Puts the chip into a raw-injection "transmitter mode": it sits on one 2.4 GHz
  * WiFi channel and continuously injects well-formed 802.11 beacon frames via
  * esp_wifi_80211_tx(). To the B210 this looks like real WiFi — bursty, 20 MHz
  * OFDM-shaped energy on a chosen channel — which is what the AoA / burst-gate
@@ -20,7 +21,7 @@
  *                        b : 1m 2m 5m 11m            (DSSS/CCK)
  *                        g : 6m 9m 12m 18m 24m 36m 48m 54m (OFDM, 6m default)
  *                        n : mcs0..mcs7              (HT20)
- *                        ax: he-mcs0..he-mcs9        (HE20 SU, 1.6 us GI)
+ *                        ax: he-mcs0..he-mcs9        (HE20 SU, 1.6 us GI; C6 only)
  *     tx    <on|off>   enable / pause injection
  *     status           print current state + frame/error counters
  *     led   <name|#rrggbb>  status LED colour (named, or any hex colour;
@@ -33,9 +34,15 @@
  * change the settings.
  *
  * One firmware image serves every board; boards are told apart by channel
- * (assigned per-board with tools/esp32c6_ctl.py) and by a MAC-derived BSSID.
+ * (assigned per-board with tools/esp32tx_ctl.py) and by a MAC-derived BSSID.
  *
- * BEESDR drone-RF R&D — Experiments/ESP32C6.
+ * WiFi or Bluetooth LE — one radio, one at a time:
+ *     mode  <wifi|ble>  select the radio personality. Saved, then the chip
+ *                       reboots (~1 s) into it with only that stack running.
+ * BLE mode (legacy / extended advertising, Coded PHY, DTM test carrier) and its
+ * commands live in ble_tx.c; `tx`, `duty`, `led` and `status` serve both modes.
+ *
+ * BEESDR drone-RF R&D — ESP32-Tx.
  */
 
 #include <stdio.h>
@@ -56,6 +63,10 @@
 #include "esp_console.h"
 #include "esp_rom_sys.h"      /* esp_rom_delay_us */
 #include "led_strip.h"        /* addressable RGB status LED (WS2812) */
+#include "soc/soc_caps.h"     /* SOC_WIFI_HE_SUPPORT */
+#include "sdkconfig.h"
+
+#include "ble_tx.h"
 
 /* ---- Compile-time default channel (override at runtime with `ch`). The flash
  * helper also assigns a per-board channel over serial right after flashing, so
@@ -64,11 +75,17 @@
 #define DEFAULT_CHANNEL 6
 #endif
 
-/* Addressable RGB LED (WS2812) pin — GPIO8 on the ESP32-C6-WROOM-1 /
- * DevKitC-1 layout. Used as a per-board colour tag so boards are told
- * apart at a glance; the dashboard sets it from a MAC->colour map. */
+/* Addressable RGB LED (WS2812) pin. Used as a per-board colour tag so boards
+ * are told apart at a glance; the dashboard sets it from a MAC->colour map.
+ *   ESP32-C6-DevKitC-1 : GPIO8
+ *   ESP32-S3-DevKitC-1 : GPIO48 (v1.0 and most clones; v1.1 moved it to GPIO38
+ *                        — build with -DLED_GPIO=38 for those) */
 #ifndef LED_GPIO
+#if CONFIG_IDF_TARGET_ESP32S3
+#define LED_GPIO 48
+#else
 #define LED_GPIO 8
+#endif
 #endif
 #define LED_LVL 48   /* per-channel brightness 0-255; low to limit current */
 
@@ -78,9 +95,13 @@ static const char *TAG = "beesdr-tx";
  * by the TX task; word-sized and single-writer per field, so no lock needed for
  * this lab tool. ---- */
 static volatile int      g_channel   = DEFAULT_CHANNEL;  /* 1..14              */
-static volatile int      g_duty      = 100;              /* 0..100 percent     */
+volatile int             g_duty      = 100;              /* 0..100 percent     */
 static volatile int      g_txpwr_dbm = 20;               /* 2..20 dBm          */
-static volatile bool     g_tx_on     = true;
+volatile bool            g_tx_on     = true;
+
+/* Radio personality. Read once at boot — changing it reboots (see cmd_mode). */
+enum { MODE_WIFI = 0, MODE_BLE = 1 };
+static int               g_mode      = MODE_WIFI;
 
 /* PHY rate table. Each entry carries the PHY mode, because the mode — not the
  * rate code — is what decides the 802.11 standard on air: MCS0 is HT (11n)
@@ -113,6 +134,7 @@ static const rate_entry_t RATES[] = {
     {"mcs5", "n", WIFI_PHY_MODE_HT20, WIFI_PHY_RATE_MCS5_LGI},
     {"mcs6", "n", WIFI_PHY_MODE_HT20, WIFI_PHY_RATE_MCS6_LGI},
     {"mcs7", "n", WIFI_PHY_MODE_HT20, WIFI_PHY_RATE_MCS7_LGI},
+#if SOC_WIFI_HE_SUPPORT   /* 11ax needs an HE radio: C6 yes, S3 no (b/g/n only) */
     {"he-mcs0", "ax", WIFI_PHY_MODE_HE20, WIFI_PHY_RATE_MCS0_LGI},
     {"he-mcs1", "ax", WIFI_PHY_MODE_HE20, WIFI_PHY_RATE_MCS1_LGI},
     {"he-mcs2", "ax", WIFI_PHY_MODE_HE20, WIFI_PHY_RATE_MCS2_LGI},
@@ -123,6 +145,7 @@ static const rate_entry_t RATES[] = {
     {"he-mcs7", "ax", WIFI_PHY_MODE_HE20, WIFI_PHY_RATE_MCS7_LGI},
     {"he-mcs8", "ax", WIFI_PHY_MODE_HE20, WIFI_PHY_RATE_MCS8_LGI},
     {"he-mcs9", "ax", WIFI_PHY_MODE_HE20, WIFI_PHY_RATE_MCS9_LGI},
+#endif
 };
 #define N_RATES (sizeof(RATES) / sizeof(RATES[0]))
 #define DEFAULT_RATE_IDX 4   /* "6m" */
@@ -150,7 +173,7 @@ static uint8_t g_led_rgb[3] = {0, 0, 0};
  * in a later firmware cannot silently map an old setting to a different rate. */
 #define NVS_NS "beesdr"
 
-static void cfg_save(void)
+void cfg_save(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
@@ -158,6 +181,8 @@ static void cfg_save(void)
     nvs_set_u8 (h, "duty", (uint8_t)g_duty);
     nvs_set_u8 (h, "pwr",  (uint8_t)g_txpwr_dbm);
     nvs_set_u8 (h, "tx",   g_tx_on ? 1 : 0);
+    nvs_set_u8 (h, "mode", (uint8_t)g_mode);
+    ble_cfg_save(h);
     nvs_set_str(h, "rate", RATES[g_rate_idx].name);
     nvs_set_str(h, "led",  g_led_name);
     nvs_set_blob(h, "led_rgb", g_led_rgb, sizeof(g_led_rgb));
@@ -178,6 +203,8 @@ static void cfg_load(void)
     if (nvs_get_u8(h, "duty", &v) == ESP_OK && v <= 100)           g_duty      = v;
     if (nvs_get_u8(h, "pwr",  &v) == ESP_OK && v >= 2 && v <= 20)  g_txpwr_dbm = v;
     if (nvs_get_u8(h, "tx",   &v) == ESP_OK)                       g_tx_on     = (v != 0);
+    if (nvs_get_u8(h, "mode", &v) == ESP_OK && v <= MODE_BLE)      g_mode      = v;
+    ble_cfg_load(h);
     char name[16];
     size_t len = sizeof(name);
     if (nvs_get_str(h, "rate", name, &len) == ESP_OK) {
@@ -190,8 +217,8 @@ static void cfg_load(void)
     len = sizeof(g_led_rgb);
     if (nvs_get_blob(h, "led_rgb", g_led_rgb, &len) != ESP_OK) memset(g_led_rgb, 0, 3);
     nvs_close(h);
-    ESP_LOGI(TAG, "restored: ch=%d duty=%d pwr=%d rate=%s tx=%s led=%s",
-             g_channel, g_duty, g_txpwr_dbm, RATES[g_rate_idx].name,
+    ESP_LOGI(TAG, "restored: mode=%s ch=%d duty=%d pwr=%d rate=%s tx=%s led=%s",
+             g_mode == MODE_BLE ? "ble" : "wifi", g_channel, g_duty, g_txpwr_dbm, RATES[g_rate_idx].name,
              g_tx_on ? "on" : "off", g_led_name);
 }
 
@@ -437,6 +464,7 @@ static int cmd_duty(int argc, char **argv)
     if (v < 0 || v > 100) { printf("ERR duty out of range 0-100\n"); return 1; }
     g_duty = v;
     cfg_save();
+    ble_cfg_changed();
     printf("OK duty=%d\n", v);
     return 0;
 }
@@ -480,20 +508,45 @@ static int cmd_tx(int argc, char **argv)
     else if (strcmp(argv[1], "off") == 0) g_tx_on = false;
     else { printf("ERR expected on|off\n"); return 1; }
     cfg_save();
+    ble_cfg_changed();
     printf("OK tx=%s\n", g_tx_on ? "on" : "off");
+    return 0;
+}
+
+/* Switch radio personality. WiFi and BLE share the one 2.4 GHz radio, so
+ * rather than time-slice them (coexistence would chop both waveforms) the
+ * choice is saved and the chip restarts with only that stack brought up. */
+static int cmd_mode(int argc, char **argv)
+{
+    int m;
+    if (argc < 2) { printf("usage: mode <wifi|ble>\n"); return 1; }
+    if      (strcmp(argv[1], "wifi") == 0) m = MODE_WIFI;
+    else if (strcmp(argv[1], "ble")  == 0) m = MODE_BLE;
+    else { printf("ERR expected wifi|ble\n"); return 1; }
+    if (m == g_mode) { printf("OK mode=%s\n", argv[1]); return 0; }
+    g_mode = m;
+    cfg_save();
+    printf("OK mode=%s rebooting\n", argv[1]);
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(150));   /* let the reply drain out of the UART */
+    esp_restart();
     return 0;
 }
 
 static int cmd_status(int argc, char **argv)
 {
-    printf("STATUS mac=%02x:%02x:%02x:%02x:%02x:%02x ch=%d duty=%d pwr=%ddBm rate=%s phy=%s rate_err=%s tx=%s "
-           "led=%s frames_ok=%llu frames_err=%llu bp=%llu ssid=BEESDR-TX-ch%02d\n",
+    /* One write for the whole line, so a log line from another task can never
+     * land in the middle of it and break the host-side parser. */
+    static char ble[320];
+    ble_status_snprint(ble, sizeof(ble));
+    printf("STATUS mac=%02x:%02x:%02x:%02x:%02x:%02x chip=" CONFIG_IDF_TARGET " mode=%s ch=%d duty=%d pwr=%ddBm rate=%s phy=%s rate_err=%s tx=%s "
+           "led=%s frames_ok=%llu frames_err=%llu bp=%llu ssid=BEESDR-TX-ch%02d%s\n",
            s_mac[0], s_mac[1], s_mac[2], s_mac[3], s_mac[4], s_mac[5],
-           g_channel, g_duty, g_txpwr_dbm, RATES[g_rate_idx].name, RATES[g_rate_idx].std,
+           g_mode == MODE_BLE ? "ble" : "wifi", g_channel, g_duty, g_txpwr_dbm, RATES[g_rate_idx].name, RATES[g_rate_idx].std,
            g_rate_err == ESP_OK ? "0" : esp_err_to_name(g_rate_err), g_tx_on ? "on" : "off",
            g_led_name,
            (unsigned long long)g_frames_ok, (unsigned long long)g_frames_err,
-           (unsigned long long)g_tx_bp, g_channel);
+           (unsigned long long)g_tx_bp, g_channel, ble);
     return 0;
 }
 
@@ -550,6 +603,7 @@ static int cmd_led(int argc, char **argv)
 static void register_commands(void)
 {
     const esp_console_cmd_t cmds[] = {
+        {.command = "mode",   .help = "radio: wifi | ble (reboots)",   .func = cmd_mode},
         {.command = "ch",     .help = "set WiFi channel 1-14",         .func = cmd_ch},
         {.command = "duty",   .help = "on-air duty cycle 0-100 pct",   .func = cmd_duty},
         {.command = "pwr",    .help = "max TX power 2-20 dBm",          .func = cmd_pwr},
@@ -561,22 +615,14 @@ static void register_commands(void)
     for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
     }
+    ble_register_commands();
 }
 
 /* ------------------------------------------------------------------- main --- */
 
-void app_main(void)
+/* Bring up the WiFi stack and the injection task (WiFi mode only). */
+static void wifi_tx_start(void)
 {
-    esp_err_t nv = nvs_flash_init();
-    if (nv == ESP_ERR_NVS_NO_FREE_PAGES || nv == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        nv = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(nv);
-    cfg_load();
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
@@ -590,22 +636,46 @@ void app_main(void)
 
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    /* Enable every 2.4 GHz standard the C6 has, so any rate in RATES[] —
-     * including HE20 (11ax) — is permitted on the interface. */
+    /* Enable every 2.4 GHz standard the chip has, so any rate in RATES[] —
+     * including HE20 (11ax) where the radio supports it — is permitted. */
     ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA,
-        WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX));
+        WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N
+#if SOC_WIFI_HE_SUPPORT
+        | WIFI_PROTOCOL_11AX
+#endif
+        ));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_ERROR_CHECK(esp_read_mac(s_mac, ESP_MAC_WIFI_STA));
     build_beacon(g_channel, g_rate_idx);
-    led_init();
-
-    ESP_LOGI(TAG, "BEESDR ESP32-C6 WiFi TX up. mac=%02x:%02x:%02x:%02x:%02x:%02x "
+    ESP_LOGI(TAG, "BEESDR " CONFIG_IDF_TARGET " WiFi TX up. mac=%02x:%02x:%02x:%02x:%02x:%02x "
              "default ch=%d", s_mac[0], s_mac[1], s_mac[2], s_mac[3],
              s_mac[4], s_mac[5], g_channel);
 
     xTaskCreatePinnedToCore(tx_task, "tx_task", 4096, NULL, 5, NULL, 0);
+}
 
+void app_main(void)
+{
+    esp_err_t nv = nvs_flash_init();
+    if (nv == ESP_ERR_NVS_NO_FREE_PAGES || nv == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nv = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(nv);
+    cfg_load();
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    ESP_ERROR_CHECK(esp_read_mac(s_mac, ESP_MAC_WIFI_STA));
+    led_init();
+
+    if (g_mode == MODE_BLE) {
+        ble_tx_start();
+        ESP_LOGI(TAG, "BEESDR " CONFIG_IDF_TARGET " BLE TX up. mac=%02x:%02x:%02x:%02x:%02x:%02x",
+                 s_mac[0], s_mac[1], s_mac[2], s_mac[3], s_mac[4], s_mac[5]);
+    } else {
+        wifi_tx_start();
+    }
     /* Interactive REPL on the USB-Serial-JTAG console. */
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();

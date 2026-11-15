@@ -1,11 +1,13 @@
 # --- Target ---
-CONFIG_IDF_TARGET="esp32c6"
+# Not pinned here: this file is shared by every target. Pick one with
+# `idf.py set-target esp32c6|esp32s3` or let tools/flash.sh do it (it reads the
+# chip type off each port). Per-target overrides go in sdkconfig.defaults.<target>.
 
 # --- Console transport ---
 # The connected C6 board reaches the host through a WCH CH343 USB-UART bridge
 # (VID 0x1a86 / PID 0x55d3), NOT the chip's native USB-Serial-JTAG. So route the
 # log AND the interactive command REPL over UART0, which is what the bridge is
-# wired to. idf.py monitor and tools/esp32c6_ctl.py then talk to the same
+# wired to. idf.py monitor and tools/esp32tx_ctl.py then talk to the same
 # /dev/cu.usbmodem* port.
 #
 # For a board that exposes the native USB-Serial-JTAG port instead (e.g. an
@@ -24,3 +26,26 @@ CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
 
 # --- Give the task WDT plenty of margin; the TX loop is deliberately hot. ---
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+
+# --- Bluetooth LE (the `mode ble` personality, firmware/main/ble_tx.c) ---
+# NimBLE host, broadcaster only: no connections, no GATT, no scanning. Extended
+# advertising brings the BT5 PHYs (2M, Coded); the v2 parameters command is what
+# lets Coded S=2 / S=8 be selected. DTM (the test carrier) is on by default.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_EXT_ADV=y
+CONFIG_BT_NIMBLE_EXT_ADV_V2=y
+CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES=1
+CONFIG_BT_NIMBLE_EXT_ADV_MAX_SIZE=255
+CONFIG_BT_NIMBLE_DTM_MODE_TEST=y
+
+# --- WiFi + BLE no longer fits the default 1 MB app slot; use the 1.5 MB one.
+# NVS keeps its offset, so saved settings survive the repartition. ---
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# NimBLE logs every GAP procedure at INFO; on the shared console that is noise
+# between command replies.
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y

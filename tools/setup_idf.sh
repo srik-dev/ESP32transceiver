@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # setup_idf.sh — one-time ESP-IDF install, SHARED by every ESP project on this Mac.
-# Already done: ~/esp/esp-idf is at v5.5.5 with the esp32c6 toolchain in
+# Already done: ~/esp/esp-idf is at v5.5.5 with the esp32c6 + esp32s3 toolchains in
 # ~/.espressif. This is the reference procedure / fallback, ~2 GB. Do not vendor a
 # second copy per project — point IDF_DIR at the shared one instead.
 set -euo pipefail
@@ -17,8 +17,8 @@ else
     https://github.com/espressif/esp-idf.git "$IDF_DIR"
 fi
 
-echo "Installing the esp32c6 toolchain ..."
-"$IDF_DIR/install.sh" esp32c6
+echo "Installing the esp32c6 + esp32s3 toolchains ..."
+"$IDF_DIR/install.sh" esp32c6,esp32s3
 
 cat <<MSG
 
@@ -28,6 +28,6 @@ Done. Activate the environment in each new shell before building:
 
 Then, from this project's firmware/ directory:
 
-    idf.py set-target esp32c6
+    idf.py set-target esp32c6      # or esp32s3
     idf.py build
 MSG
