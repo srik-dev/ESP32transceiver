@@ -47,8 +47,8 @@ multi-channel emitter set.
 
 - **Not a WiFi client or AP.** The boards never associate. They inject raw 802.11
   beacon frames and nothing else.
-- **Not a receiver.** Despite the repository name, this is transmit-only. There is
-  no capture, demodulation or sniffing path.
+- **Not a receiver.** Transmit-only: there is no capture, demodulation or
+  sniffing path.
 - **Not a BLE peripheral.** BLE mode only broadcasts (advertising or a DTM test
   carrier); nothing can connect to a board. See [Bluetooth LE mode](#bluetooth-le-mode).
 - **Not WiFi and BLE at once.** One radio: a board is in one mode or the other.
@@ -57,7 +57,7 @@ multi-channel emitter set.
   associated to an access point while injecting on a channel of your choosing. The
   dashboard is a web UI *on the Mac* that bridges HTTP to the USB serial ports; the
   boards themselves are never on the network.
-- **Not a general ESP-IDF template.** It is one application, pinned to one target.
+- **Not a general ESP-IDF template.** It is one application for two targets.
 
 **Intended use.** Deliberate, authorized injection on a bench or in a shielded
 setup. See [Notes / gotchas](#notes--gotchas) about channels 12–14.
@@ -100,8 +100,8 @@ ESP32Tx/
 
 | Path | What it is |
 |---|---|
-| `firmware/build/` | ~215 MB of CMake/ninja output, incl. `beesdr_wifi_tx.bin` |
-| `firmware/sdkconfig` | derived from `sdkconfig.defaults` on first build |
+| `firmware/build/`, `firmware/build-esp32s3/` | CMake/ninja output per target (~215 MB each), incl. `beesdr_wifi_tx.bin` |
+| `firmware/sdkconfig`, `firmware/sdkconfig.esp32s3` | derived from `sdkconfig.defaults*` on first build |
 | `firmware/managed_components/` | fetched by the IDF component manager |
 | `firmware/dependencies.lock` | resolved component versions |
 
@@ -223,8 +223,11 @@ tools/flash.sh /dev/cu.usbmodem101              # one specific port
 tools/flash.sh --monitor /dev/cu.usbmodem101    # flash, then open the monitor
 ```
 
-**Stop the dashboard service first** — one process per serial port, and the
-always-on service holds them.
+**Free the port first** — one process per serial port, and the always-on
+dashboard holds every board. Use the card's **Release port** toggle (or its
+**Reflash** button, which does the whole thing from the browser). Any other
+program with the port open blocks flashing the same way; `lsof /dev/cu.usbmodemXXXX`
+names it.
 
 ---
 
@@ -322,7 +325,13 @@ interval). **For a steady emitter the SDR can lock onto, use `dtm`.**
   "Set Extended Advertising Parameters v2" command. The firmware tries it and falls
   back to the controller's default; `coding=ctrl` in `status` means the controller
   picked (normally S=8). **The ESP32-S3 controller reports `ctrl`** (measured
-  2026-11-14); the C6 is untested. In `dtm` the coding is always exactly what you ask for.
+  2026-11-14); **the ESP32-C6 honours the choice** and reports `s8` / `s2` (measured
+  2026-11-16). In `dtm` the coding is always exactly what you ask for.
+- **Long data on Coded PHY needs a longer interval.** The controller refuses
+  extended advertising whose packet does not fit in the interval
+  (`ble_err=adv_data:581`, HCI "Packet Too Long"). On the C6 a full 251-byte payload
+  at `itvl 20` fails on `s8` and `s2`; `s8` works from `itvl 50`, `s2` from `itvl 30`,
+  and 120 bytes fits at `itvl 20`. The dashboard spells this out next to the PHY selector.
 - 2M is never used on the primary advertising channels — the spec does not allow it.
 - The C6 controller builds DTM out by default; `firmware/sdkconfig.defaults.esp32c6`
   turns it on.
@@ -422,7 +431,7 @@ The UI is a thin client over this; it is equally usable from `curl` or a script.
 | Method | Path | Body | Returns |
 |---|---|---|---|
 | `GET` | `/` | — | the UI |
-| `GET` | `/api/devices` | — | `{devices: [...], time}` |
+| `GET` | `/api/devices` | — | `{devices: [...], firmware: {target: build time}, time}` |
 | `POST` | `/api/set` | `{port, ...fields}` | `{device}` |
 | `POST` | `/api/all` | `{...fields}` | `{applied: [ports], devices}` |
 | `POST` | `/api/raw` | `{port, cmd}` | `{resp, device}` |
@@ -432,6 +441,8 @@ The UI is a thin client over this; it is equally usable from `curl` or a script.
 Settable fields, applied in this order and silently skipped when out of range:
 `ch` (1–14), `duty` (0–100), `pwr` (2–20), `rate` (one of the names above), `tx`
 (`true` / `"on"` / `1` → on, anything else → off), `led` (`#rrggbb`, `/api/set` only).
+A value of the wrong type, a bad `mode` or a bad `led` is a `400` with `{error}`;
+an unknown or released port is a `404`.
 
 `mode` (`"wifi"` / `"ble"`) is applied first and waits for the board to reboot. BLE
 fields: `ble`, `bphy`, `bch`, `advch` (list, e.g. `[37,39]`), `itvl`, `bpwr`, `pat`,
@@ -447,7 +458,8 @@ top bar switch every board.
   The card dims; **Reconnect** takes the port back. Unplugging the board clears it.
 - **Reflash** (click twice — the first click arms it) releases the port, writes the
   firmware with esptool, and reconnects. Progress and the result show next to the
-  button; settings in NVS are kept. It works on "Unknown serial device" cards too
+  button until the board is unplugged; settings in NVS are kept. It works on
+  "Unknown serial device" cards too
   (the chip type is read from the ROM bootloader), so a brand-new board can be
   flashed from the browser.
 
@@ -465,7 +477,8 @@ after a full-erase reflash. Boards with no pick fall back to the `LED_COLORS`
 table in `serve.py`.
 
 Each device reports `port`, `mac`, `ch`, `freq`, `duty`, `pwr`, `rate`, `tx`,
-`frames_ok`, `is_ours` (does it speak this firmware's protocol) and `open_error`.
+`frames_ok`, `is_ours` (does it speak this firmware's protocol), `probing` (just
+opened, first status reply still pending) and `open_error`.
 
 ```bash
 curl -s localhost:8760/api/devices | python3 -m json.tool
@@ -534,9 +547,13 @@ Exercised on an ESP32-S3: every `ble` / `phy` / channel / power / pattern
 combination is accepted by the controller with `ble_err=0`, and legacy advertising
 was received by name on the Mac's own Bluetooth. Extended advertising and DTM have
 not been observed on air yet (macOS does not report non-connectable extended
-advertising), and nothing has been run on a C6.
+advertising).
 
-**Builds clean** against the shared ESP-IDF v5.5.5 (verified 2026-09-06):
-`beesdr_wifi_tx.bin`, 0xdb610 bytes, 14% free in the app partition. The dashboard
-runs as a login service and is serving on 8760. Flashing to boards and measuring
-the emitted spectrum is the remaining step to exercise on hardware.
+**Exercised on an ESP32-C6 2026-11-16**, through the dashboard API: all 13 channel
+buttons, duty, power, every b / g / n / ax rate (`rate_err=0` throughout, ~3900
+beacons/s at `36m`), LED colour, both mode switches, every BLE kind / PHY / channel /
+pattern / length / power setting, Release port, Reconnect and Reflash. Still not
+observed on air with an SDR: extended advertising and DTM.
+
+**Builds clean** against the shared ESP-IDF v5.5.5. The dashboard runs as a login
+service and is serving on 8760.

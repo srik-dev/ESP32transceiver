@@ -12,9 +12,6 @@ Boards on a CH340 bridge macOS has no driver for (CH340K, 1a86:7522) have no
 /dev entry; they are reached through tools/ch340_usb.py (libusb) and show up as
 ports named ch340:<bus>-<port path>.
 
-Run from the repo root (the project convention), though this tool writes
-nothing under Experiments/ so it is path-agnostic.
-
 Examples:
     # See which boards are plugged in
     tools/esp32tx_ctl.py list
@@ -150,7 +147,8 @@ def cmd_list(args):
     ports = find_ports(args.port)
     if not ports:
         print("No ESP32 console ports found "
-              "(looked for /dev/cu.usbmodem*, usbserial*, wchusbserial*).")
+              "(looked for /dev/cu.usbmodem*, usbserial*, wchusbserial*,\n"
+              "SLAB_USBtoUART* and driverless CH340 bridges).")
         print("Is a board plugged in and its USB driver present?")
         return 1
     print("Detected %d candidate port(s):" % len(ports))

@@ -40,7 +40,8 @@ done
 
 if [ "${#PORTS[@]}" -eq 0 ]; then
   # autodetect
-  for p in /dev/cu.usbmodem* /dev/cu.usbserial* /dev/cu.wchusbserial*; do
+  for p in /dev/cu.usbmodem* /dev/cu.usbserial* /dev/cu.wchusbserial* \
+           /dev/cu.SLAB_USBtoUART*; do
     [ -e "$p" ] || continue
     case "$p" in *Bluetooth*|*debug-console*) continue ;; esac
     PORTS+=("$p")
@@ -70,7 +71,7 @@ detect_target() {
       ch340:*) python "$HERE/ch340_usb.py" esptool "$1" chip_id ;;
       *)       esptool.py -p "$1" chip_id ;;
     esac; } 2>/dev/null \
-    | grep -oE 'ESP32-[A-Z][0-9]+' | head -1 | tr 'A-Z' 'a-z' | tr -d '-'
+    | grep -oE 'ESP32-[A-Z][0-9]+' | head -1 | tr 'A-Z' 'a-z' | tr -d '-' || true
 }
 
 TARGETS=()
@@ -79,7 +80,9 @@ for p in "${PORTS[@]}"; do
   t="${TARGET:-$(detect_target "$p")}"
   case "$t" in
     esp32c6|esp32s3) ;;
-    *) echo "$p: unsupported or undetected chip '${t:-?}' (use --target)" >&2; exit 1 ;;
+    *) echo "$p: unsupported or undetected chip '${t:-?}'." >&2
+       echo "Is another program holding the port (lsof $p)? Otherwise pass --target." >&2
+       exit 1 ;;
   esac
   TARGETS+=("$t")
   case "$BUILT" in *" $t "*) continue ;; esac

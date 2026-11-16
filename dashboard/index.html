@@ -141,8 +141,8 @@
   <button class="btn small" onclick="allMode('wifi')" title="Switch every board to WiFi mode">All WiFi</button>
   <button class="btn small" onclick="allMode('ble')" title="Switch every board to BLE mode">All BLE</button>
   <button class="btn small" onclick="autoPlan()" title="Assign channels 1,6,11 across the boards">Auto 1 / 6 / 11</button>
-  <button class="btn small primary" onclick="allTx(true)">Start all</button>
-  <button class="btn small danger" onclick="allTx(false)">Stop all</button>
+  <button class="btn small primary" onclick="allTx(true)" title="Start transmitting on every board">Start all</button>
+  <button class="btn small danger" onclick="allTx(false)" title="Pause transmission on every board">Stop all</button>
 </header>
 <div id="banner"></div>
 <main id="cards"><div class="empty" id="empty">Looking for boards…</div></main>
@@ -190,6 +190,11 @@ const BLE_PATTERNS = [["prbs9","PRBS9 (pseudo-random)"],["prbs15","PRBS15 (pseud
   ["ones","all ones"],["zeros","all zeros"]];
 const ADV_CH = [[37,2402],[38,2426],[39,2480]];
 const ADV_RF = new Set([0,12,39]);          // RF indices of advertising channels 37/38/39
+const EXT_LEN_MAX = 251;
+// HCI status the controller returns (as <step>:<0x200+status>), in plain words
+const BLE_ERR_HINT = {
+  "581":"data too long for this interval — raise the interval or shorten the data",
+};
 const ITVLS = [20,30,50,100,200,500,1000,2000,5000,10240];
 const BLE_PWR = [-24,-21,-18,-15,-12,-9,-6,-3,0,3,6,9,12,15,18,20];
 function rfFreq(i){ return 2402+2*i; }
@@ -209,24 +214,41 @@ async function api(path, body){
   const opt = body ? {method:"POST",headers:{"Content-Type":"application/json"},
                       body:JSON.stringify(body)} : {};
   const r = await fetch(path, opt);
-  if(!r.ok) throw new Error(path+" -> "+r.status);
+  if(!r.ok){
+    let why="";
+    try{ why=(await r.json()).error||""; }catch(e){}
+    throw new Error(why||(path+" -> "+r.status));
+  }
   return r.json();
 }
+// Banner: a notice (command failed / in progress) stays up for a few seconds;
+// "server unreachable" stays up for as long as polling keeps failing.
+let notice="", noticeTimer=0, offline="";
+function paintBanner(){
+  const b=document.getElementById("banner"), msg=offline||notice;
+  b.textContent=msg; b.style.display=msg?"block":"none";
+}
 function setBanner(msg){
-  const b=document.getElementById("banner");
-  if(msg){b.textContent=msg;b.style.display="block";} else b.style.display="none";
+  notice=msg; clearTimeout(noticeTimer);
+  if(msg) noticeTimer=setTimeout(()=>{notice="";paintBanner();},8000);
+  paintBanner();
 }
 async function set(port, body){
   for(const k of Object.keys(body)) markEdit(port,k);
   try{ await api("/api/set", Object.assign({port}, body)); refresh(); }
   catch(e){ setBanner("Command failed: "+e.message); }
 }
-async function allTx(on){ try{ await api("/api/all",{tx:on}); refresh(); }catch(e){ setBanner(e.message);} }
+async function allTx(on){
+  try{ await api("/api/all",{tx:on}); refresh(); }
+  catch(e){ setBanner("Command failed: "+e.message); }
+}
 async function allMode(m){
   setBanner("Switching every board to "+(m==="ble"?"BLE":"WiFi")+" — each one reboots (~1 s)…");
-  try{ await api("/api/all",{mode:m}); refresh(); }catch(e){ setBanner(e.message);} }
+  try{ await api("/api/all",{mode:m}); setBanner(""); refresh(); }
+  catch(e){ setBanner("Command failed: "+e.message); }
+}
 async function autoPlan(){
-  const ours=lastState.filter(d=>d.is_ours), plan=[1,6,11];
+  const ours=lastState.filter(d=>d.is_ours&&!d.released), plan=[1,6,11];
   for(let i=0;i<ours.length;i++) await set(ours[i].port,{ch:plan[i%3]});
 }
 
@@ -444,8 +466,10 @@ function buildOurs(d){
     rfEls.forEach((b,i)=>b.classList.toggle("sel", i===d.bch));
     if(!busy(p,"itvl",sItvl)){
       const opts=ITVLS.includes(d.itvl)?ITVLS:[...ITVLS,d.itvl].sort((a,b)=>a-b);
-      if(sItvl.options.length!==opts.length)
+      if(sItvl.dataset.opts!==opts.join()){
+        sItvl.dataset.opts=opts.join();
         sItvl.innerHTML=opts.map(v=>`<option value="${v}">${itvlLabel(v)}</option>`).join("");
+      }
       sItvl.value=d.itvl;
     }
     if(!busy(p,"pat",sPat) && d.pat) sPat.value=d.pat;
@@ -456,7 +480,12 @@ function buildOurs(d){
     sBphy.disabled=(kind==="adv");
     if(!busy(p,"bphy",sBphy)) sBphy.value=(kind==="adv")?"1m":d.bphy;
     vLenLbl.textContent=(kind==="dtm")?"Payload length":"Advertising data length";
-    if(!busy(p,"len",sLen)){ sLen.value=d.len; vLen.textContent=d.len+" B"; }
+    // extended advertising data is capped so it stays in one AUX_ADV_IND
+    const lenMax=(kind==="dtm")?255:EXT_LEN_MAX;
+    sLen.max=lenMax;
+    if(!busy(p,"len",sLen)){
+      sLen.value=Math.min(d.len,lenMax); vLen.textContent=Math.min(d.len,lenMax)+" B";
+    }
     if(d.bpwr_min!==pwrMin){
       pwrMin=d.bpwr_min; pwrLevels=BLE_PWR.filter(v=>v>=pwrMin); sBpwr.max=pwrLevels.length-1;
     }
@@ -475,7 +504,9 @@ function buildOurs(d){
     vPhy.textContent=gen+" · "+(kind==="adv"?"1M":PHY_SHORT[d.bphy]||d.bphy);
     vPhy.className="phy v-phy phy-ble"; vPhy.style.display="";
     const err=d.ble_err&&d.ble_err!=="0";
-    vRerr.textContent=err?("error: "+d.ble_err):"";
+    const why=BLE_ERR_HINT[(d.ble_err||"").split(":")[1]];
+    vRerr.textContent=err?(why||("error: "+d.ble_err)):"";
+    vRerr.title=err?("controller error "+d.ble_err):"";
     const live=on&&(d.ble_state==="adv"||d.ble_state==="dtm")&&!err;
     dot.className="dot "+(!on?"off":(live?"on":"idle"));
     vBstate.textContent={adv:"advertising",dtm:"test carrier",idle:"paused",init:"starting",
@@ -511,6 +542,7 @@ function buildOurs(d){
     last=d; foot(d);
     const on=d.tx==="on", live=on&&d.fps>0;
     if(d.has_ble) el.dataset.ble="1"; else delete el.dataset.ble;
+    sLed.disabled=!!d.released;
     const mode=pendingMode||d.mode||"wifi";
     paintMode(mode);
     sTx.textContent=on?"STOP TX":"START TX";
@@ -537,6 +569,7 @@ function buildOurs(d){
     vPhy.className="phy v-phy"+(std?" phy-"+std:"");
     vPhy.style.display=std?"":"none";
     vRerr.textContent=(d.rate_err&&d.rate_err!=="0")?("rejected: "+d.rate_err):"";
+    vRerr.title="";
     vFps.textContent=d.fps+" fps"; vOk.textContent=fmt(d.frames_ok);
     vErr.textContent=fmt(d.frames_err); vBp.textContent=fmt(d.bp);
     vSsid.textContent=d.ssid||"—"; vAge.textContent=d.age!=null?d.age+"s":"—";
@@ -549,13 +582,20 @@ function buildUnknown(d){
   const el=document.createElement("div");
   el.className="card unknown";
   el.innerHTML=`<div class="chead"><span class="dot off"></span>
-      <span class="id">Unknown serial device</span></div>
-    <div class="warnbox"><b>No status reply</b> from <code>${d.port}</code>.<br><br>
+      <span class="id"></span></div>
+    <div class="hint v-probing">Waiting for <code>${d.port}</code> to answer…</div>
+    <div class="warnbox"><b>No status reply</b> from <code>${d.port}</code>.<span class="v-openerr"></span><br><br>
       • <b>New board?</b> Press <b>Reflash</b> below, or run <code>tools/flash.sh ${d.port}</code><br>
       • <b>Was it working?</b> It likely lost power or crashed — unplug/replug it. If a board drops when others transmit, use a <b>powered USB hub</b> or lower TX power.</div>`;
-  const foot=buildFoot(el,d.port);
-  foot(d);
-  return {el, kind:"unknown", update:foot};
+  const foot=buildFoot(el,d.port), vOpenErr=el.querySelector(".v-openerr");
+  const vId=el.querySelector(".id"), vProbe=el.querySelector(".v-probing"), warn=el.querySelector(".warnbox");
+  const update=d=>{
+    const probing=!!d.probing&&!d.released;     // first status reply still pending
+    vId.textContent=probing?"Connecting…":"Unknown serial device";
+    vProbe.style.display=probing?"":"none"; warn.style.display=probing?"none":"";
+    vOpenErr.textContent=d.open_error?(" Could not open the port: "+d.open_error):""; foot(d); };
+  update(d);
+  return {el, kind:"unknown", update};
 }
 
 let lastState=[];
@@ -580,12 +620,13 @@ function reconcile(state){
 async function refresh(){
   try{
     const j=await api("/api/devices");
-    setBanner("");
+    offline=""; paintBanner();
     document.getElementById("clock").textContent=new Date(j.time*1000).toLocaleTimeString();
     firmware=j.firmware||{};
     reconcile(j.devices);
   }catch(e){
-    setBanner("Dashboard server unreachable — is serve.py still running? ("+e.message+")");
+    offline="Dashboard server unreachable — is serve.py still running? ("+e.message+")";
+    paintBanner();
   }
 }
 refresh();

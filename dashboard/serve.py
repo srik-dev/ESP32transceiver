@@ -56,10 +56,10 @@ try:
 except ImportError:
     ch340_usb = None
 
-# Physical board colour by MAC — drives the on-board WS2812 and the UI tag.
-# The dashboard re-applies this on every connect, so it survives the
-# reset-on-open that wipes the board back to firmware defaults. Add rows as
-# boards are introduced.
+# Default board colour by MAC — drives the on-board WS2812 and the UI tag until
+# a colour is picked in the dashboard. Re-applied whenever a board reports a
+# different one (e.g. after a full-erase reflash). Add rows as boards are
+# introduced.
 LED_COLORS = {
     "98:a3:16:98:12:14": "red",
     "f0:f5:bd:0e:df:f8": "green",
@@ -119,6 +119,7 @@ def to_hex(led):
     if HEX_RE.match(led):
         return led
     return NAMED_HEX.get(led)
+
 
 # 2.4 GHz channel -> centre frequency (MHz)
 def chan_freq(ch):
@@ -323,6 +324,10 @@ class Device:
         return {
             "port": self.port,
             "is_ours": self.is_ours,
+            # just opened: no status reply yet, but not enough misses to call
+            # it a stranger (the UI shows "Connecting" instead of a warning)
+            "probing": (not self.is_ours and self._misses < 4
+                        and self._thread is not None),
             "open_error": self.open_error,
             "mac": s.get("mac", ""),
             # firmware older than the S3 port has no chip= and is always a C6
@@ -518,6 +523,14 @@ class Manager:
     def scan(self):
         ports = set(find_ports())
         with self.lock:
+            for p in list(self.flash):
+                # a flash result belongs to the board that was plugged in then
+                if p not in ports and self.flash[p]["state"] != "running":
+                    del self.flash[p]
+            for p, d in list(self.devices.items()):
+                # the port could not be opened (busy, permissions): try again
+                if d.fd is None and d.usb is None:
+                    del self.devices[p]
             for p in list(self.held):
                 # an unplugged board forgets its release; mid-flash the port may
                 # blink out while the chip resets, so keep that one
@@ -613,8 +626,6 @@ def apply_settings(dev, body):
                 if dev.status.get("mode") == mode and dev._misses == 0:
                     break
     apply_ble(dev, body, out)
-    # pause first if channel is changing and tx is being (re)started, so the
-    # firmware applies cleanly — but the firmware handles live changes anyway.
     if "ch" in body:
         ch = int(body["ch"])
         if 1 <= ch <= 14:
@@ -666,14 +677,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/" or self.path.startswith("/index"):
+        path = self.path.split("?", 1)[0]
+        if path == "/" or path.startswith("/index"):
             try:
                 with open(os.path.join(HERE, "index.html"), "rb") as f:
                     self._send(200, f.read(), "text/html; charset=utf-8")
             except OSError:
                 self._send(500, {"error": "index.html missing"})
             return
-        if self.path == "/api/devices":
+        if path == "/api/devices":
             self._send(200, {"devices": MGR.snapshot(), "firmware": firmware_info(),
                              "time": time.time()})
             return
@@ -687,6 +699,9 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             self._send(400, {"error": "bad json"})
             return
+        if not isinstance(body, dict):
+            self._send(400, {"error": "body must be a JSON object"})
+            return
 
         if self.path == "/api/set":
             port = body.get("port")
@@ -696,7 +711,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 apply_settings(dev, body)
-            except (ValueError, OSError) as e:
+            except (ValueError, TypeError) as e:      # a bad field value
+                self._send(400, {"error": str(e)})
+                return
+            except OSError as e:
                 self._send(500, {"error": str(e)})
                 return
             self._send(200, {"device": dev.as_dict()})
@@ -733,7 +751,7 @@ class Handler(BaseHTTPRequestHandler):
                 if d.is_ours:
                     try:
                         apply_settings(d, body)
-                    except (ValueError, OSError):
+                    except (ValueError, TypeError, OSError):
                         continue        # e.g. a WiFi-only board asked for BLE
                     applied.append(d.port)
             self._send(200, {"applied": applied, "devices": MGR.snapshot()})
