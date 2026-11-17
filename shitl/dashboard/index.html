@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32-SHITL-Tx — timed TX over the air</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232d; --line:#2a3441;
+    --txt:#e6edf3; --dim:#8b98a5; --accent:#3fb950; --accent2:#2f81f7;
+    --warn:#d29922; --err:#f85149; --chip:#21262d; --ble:#1b7f88;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{position:sticky;top:0;z-index:5;background:#0e1116ee;border-bottom:1px solid var(--line);
+    padding:14px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.2px}
+  header h1 span{color:var(--dim);font-weight:400}
+  .spacer{flex:1}
+  .pill{background:var(--chip);border:1px solid var(--line);border-radius:999px;
+    padding:4px 10px;font-size:12px;color:var(--dim);white-space:nowrap}
+  .pill b{color:var(--txt)}
+  .btn{background:var(--panel2);border:1px solid var(--line);color:var(--txt);
+    border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer;transition:.12s;white-space:nowrap}
+  .btn:hover{border-color:#3d4a5a;background:#232c38}
+  .btn.primary{background:#23863633;border-color:var(--accent);color:#d6ffe0;font-weight:700}
+  .btn.danger{background:#f8514922;border-color:var(--err);color:#ffd1cd}
+  .btn.small{padding:5px 10px;font-size:12px}
+  .btn.armed{background:#d2992222;border-color:var(--warn);color:#f5d99a}
+  .btn:disabled{opacity:.45;cursor:default}
+  input[type=number],input[type=text],select{background:var(--panel2);color:var(--txt);
+    border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-size:13px;width:100%;
+    font-variant-numeric:tabular-nums}
+  header input[type=text]{width:140px}
+  #banner{display:none;padding:9px 20px;background:#f8514922;border-bottom:1px solid var(--err);
+    color:#ffd1cd;font-size:13px}
+  main{padding:20px;display:grid;gap:18px;align-items:start;
+    grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr))}
+  @media (max-width:480px){ main{padding:12px;gap:12px} header{padding:12px} }
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:16px;display:flex;flex-direction:column;gap:14px;min-width:0;max-width:640px}
+  .chead{display:grid;grid-template-columns:auto auto minmax(0,1fr) auto;align-items:center;gap:10px}
+  .who{min-width:0}
+  .who .id{font-weight:600;font-size:14px}
+  .who .sub{color:var(--dim);font-size:11px;font-family:ui-monospace,Menlo,monospace}
+  .who .id,.who .sub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dot{width:11px;height:11px;border-radius:50%;flex:none;background:#5b6774}
+  .card[data-state=online] .dot{background:var(--accent);box-shadow:0 0 9px var(--accent)}
+  .card[data-state=pending] .dot,.card[data-state=rejoining] .dot,
+  .card[data-state=updating] .dot{background:var(--warn)}
+  .card[data-state=transmitting] .dot{background:var(--err);box-shadow:0 0 10px var(--err)}
+  .swatch{-webkit-appearance:none;appearance:none;flex:none;width:22px;height:22px;padding:0;
+    border:2px solid var(--line);border-radius:50%;background:none;cursor:pointer}
+  .swatch::-webkit-color-swatch-wrapper{padding:0}
+  .swatch::-webkit-color-swatch{border:none;border-radius:50%}
+  .badge{font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;
+    border-radius:6px;padding:3px 8px;border:1px solid var(--line);color:var(--dim);white-space:nowrap}
+  .card[data-state=online] .badge{color:#7ee787;border-color:#7ee78766;background:#7ee78718}
+  .card[data-state=transmitting] .badge{color:#ffb3ad;border-color:#f8514988;background:#f8514922}
+  .card[data-state=pending] .badge,.card[data-state=rejoining] .badge,
+  .card[data-state=updating] .badge{color:#f5d99a;border-color:#d2992288;background:#d2992218}
+  .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);
+    margin-bottom:7px;display:flex;justify-content:space-between;gap:8px}
+  .lbl b{color:var(--txt);font-weight:600;text-transform:none;letter-spacing:0;font-variant-numeric:tabular-nums}
+  .seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;border:1px solid var(--line);
+    border-radius:9px;overflow:hidden;background:var(--panel2)}
+  .seg button{background:none;border:0;border-right:1px solid var(--line);color:var(--dim);
+    padding:8px 6px;font-size:13px;font-weight:600;cursor:pointer}
+  .seg button:last-child{border-right:0}
+  .seg button:hover{color:var(--txt)}
+  .seg button.sel{background:var(--accent2);color:#fff}
+  .seg small{display:block;font-weight:400;font-size:10.5px;opacity:.8}
+  .card[data-mode=ble] .seg button.sel{background:var(--ble)}
+  .grid{display:grid;gap:6px}
+  .g7{grid-template-columns:repeat(7,1fr)} .g10{grid-template-columns:repeat(10,1fr);gap:4px}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  .chan{border:1px solid var(--line);background:var(--panel2);color:var(--txt);border-radius:8px;
+    padding:8px 0;text-align:center;cursor:pointer;font-size:13px;font-weight:600}
+  .g10 .chan{padding:6px 0;font-size:12px;border-radius:6px}
+  .chan:hover{border-color:#3d4a5a}
+  .chan.sel{background:var(--accent2);border-color:var(--accent2);color:#fff}
+  .card[data-mode=ble] .chan.sel{background:var(--ble);border-color:var(--ble)}
+  .chan.restricted{opacity:.5}
+  .chan small{display:block;font-weight:400;font-size:10.5px;opacity:.75}
+  .slider{display:flex;align-items:center;gap:10px}
+  .slider input{flex:1;accent-color:var(--accent2)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .sect{display:flex;flex-direction:column;gap:14px}
+  .card[data-mode=wifi] .ble-only,.card[data-mode=ble] .wifi-only{display:none}
+  .card[data-kind=dtm] .adv-only,.card:not([data-kind=dtm]) .dtm-only{display:none}
+  .card[data-kind=adv] .notadv{display:none}
+  .card[data-mode=ble]:not([data-kind=dtm]) .duty-blk{display:none}
+  .job{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px;
+    display:flex;flex-direction:column;gap:10px}
+  .jobrow{display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end}
+  .jobrow .btn{padding:9px 16px}
+  .prog{display:none;flex-direction:column;gap:6px}
+  .card[data-state=pending] .prog,.card[data-state=transmitting] .prog,
+  .card[data-state=rejoining] .prog,.card[data-state=updating] .prog{display:flex}
+  .bar{height:8px;border-radius:999px;background:#0b0e13;border:1px solid var(--line);overflow:hidden}
+  .bar i{display:block;height:100%;width:0;background:var(--err);transition:width .25s linear}
+  .card[data-state=pending] .bar i,.card[data-state=rejoining] .bar i,
+  .card[data-state=updating] .bar i{background:var(--warn)}
+  .prog .msg{font-size:12.5px;display:flex;justify-content:space-between;gap:10px}
+  .prog .msg b{font-variant-numeric:tabular-nums}
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;font-size:12px;
+    border-top:1px solid var(--line);padding-top:12px}
+  .stats div{display:flex;justify-content:space-between;gap:8px;min-width:0}
+  .stats .k{color:var(--dim);white-space:nowrap}
+  .stats .v{font-family:ui-monospace,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .foot{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);padding-top:12px}
+  .foot .note{flex:1;min-width:0;font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .foot .note.ok{color:var(--accent)} .foot .note.bad{color:var(--err)}
+  .hint{font-size:11.5px;color:var(--dim);line-height:1.45}
+  .err{font-size:12.5px;color:#ffb3ad;min-height:0}
+  .card:not([data-state=online]) .ctl{opacity:.45;pointer-events:none}
+  .empty{color:var(--dim);padding:50px 20px;grid-column:1/-1;max-width:640px;margin:0 auto;line-height:1.7}
+  code{background:#0b0e13;border:1px solid var(--line);border-radius:5px;padding:1px 5px;
+    font-family:ui-monospace,Menlo,monospace;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🐝 ESP32-SHITL-Tx <span>timed TX over the air</span></h1>
+  <span class="pill">boards <b id="devcount">0</b></span>
+  <span class="pill">firmware build <b id="fwbuild">—</b></span>
+  <div class="spacer"></div>
+  <input type="text" id="addip" placeholder="add by IP address" aria-label="Board IP address">
+  <button class="btn small" onclick="addIp()">Add</button>
+</header>
+<div id="banner"></div>
+<main id="cards"><div class="empty" id="empty">
+  <b>Listening for boards…</b><br>
+  A board appears here by itself once it has joined the same network as this computer
+  (it announces itself on UDP 8762). To put a new board on the network, plug it into USB and run<br>
+  <code>tools/shitltx_ctl.py --port /dev/cu.usbmodemXXXX wifi &lt;ssid&gt; '&lt;password&gt;'</code><br>
+  If announcements are blocked on your network, add the board by its IP address above.
+</div></main>
+
+<script>
+const WIFI_RATES = [
+  ["802.11b (DSSS/CCK)", ["1m","2m","5m","11m"]],
+  ["802.11g (OFDM)", ["6m","9m","12m","18m","24m","36m","48m","54m"]],
+  ["802.11n (HT20)", ["mcs0","mcs1","mcs2","mcs3","mcs4","mcs5","mcs6","mcs7"]],
+  ["802.11ax (HE20)", ["he-mcs0","he-mcs1","he-mcs2","he-mcs3","he-mcs4","he-mcs5","he-mcs6","he-mcs7","he-mcs8","he-mcs9"]],
+];
+const BLE_PWR = [-24,-21,-18,-15,-12,-9,-6,-3,0,3,6,9,12,15,18,20];
+const PATS = ["prbs9","prbs15","10101010","01010101","11110000","00001111","ones","zeros"];
+const NAMED = {off:"#000000",red:"#ff0000",green:"#00ff00",blue:"#0000ff",yellow:"#ffff00",
+               cyan:"#00ffff",magenta:"#ff00ff",white:"#ffffff",orange:"#ff4000"};
+const cards = {};          // mac -> {el, draft, dirty, dev}
+let skew = 0;              // server clock - browser clock, seconds
+let firmware = {};
+
+const $ = (el, sel) => el.querySelector(sel);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const wifiFreq = ch => ch == 14 ? 2484 : 2407 + 5 * ch;
+const fmtS = s => s >= 100 ? s.toFixed(0) : s.toFixed(1);
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} :
+    {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  return r.json();
+}
+
+function fromStatus(st) {
+  return {mode: st.mode || "wifi", ch: +st.ch || 6, rate: st.rate || "6m", pwr: parseInt(st.pwr) || 20,
+          duty: st.duty === undefined ? 100 : +st.duty, ble: st.ble || "adv", bphy: st.bphy || "1m",
+          bch: +st.bch || 0, advch: st.advch || "37,38,39", itvl: +st.itvl || 20,
+          bpwr: st.bpwr === undefined ? 9 : +st.bpwr, pat: st.pat || "prbs9",
+          len: st.len === undefined ? 37 : +st.len};
+}
+
+function cardHtml(dev) {
+  const st = dev.st, he = st.chip === "esp32c6";
+  const rates = WIFI_RATES.filter(g => he || !g[0].includes("ax")).map(g =>
+    `<optgroup label="${g[0]}">${g[1].map(r => `<option>${r}</option>`).join("")}</optgroup>`).join("");
+  const pmin = st.bpwr_min === undefined ? -15 : +st.bpwr_min;
+  let wch = "", bchs = "";
+  for (let c = 1; c <= 14; c++) wch += `<div class="chan${c > 11 ? " restricted" : ""}" data-ch="${c}" title="${wifiFreq(c)} MHz">${c}</div>`;
+  for (let c = 0; c < 40; c++) bchs += `<div class="chan" data-bch="${c}" title="${2402 + 2 * c} MHz">${c}</div>`;
+  return `
+  <div class="chead">
+    <input type="color" class="swatch" title="Board LED colour">
+    <span class="dot"></span>
+    <div class="who"><div class="id"></div><div class="sub"></div></div>
+    <span class="badge"></span>
+  </div>
+  <div class="prog">
+    <div class="msg"><span class="pmsg"></span><b class="pleft"></b></div>
+    <div class="bar"><i></i></div>
+  </div>
+  <div class="sect ctl">
+    <div class="seg modesw">
+      <button data-mode="wifi">WiFi<small>802.11 beacons</small></button>
+      <button data-mode="ble">Bluetooth LE<small>adv · ext · DTM</small></button>
+    </div>
+    <div class="sect wifi-only">
+      <div><div class="lbl"><span>Channel</span><b class="v-wfreq"></b></div><div class="grid g7 wchans">${wch}</div></div>
+      <div class="two">
+        <div><div class="lbl"><span>Rate / standard</span></div><select data-k="rate">${rates}</select></div>
+        <div><div class="lbl"><span>TX power</span><b class="v-pwr"></b></div>
+          <div class="slider"><input type="range" min="2" max="20" step="1" data-k="pwr" data-num></div></div>
+      </div>
+    </div>
+    <div class="sect ble-only">
+      <div class="seg kindsw">
+        <button data-kind="adv">Legacy adv<small>BT4 · 37/38/39</small></button>
+        <button data-kind="ext">Extended adv<small>BT5 PHYs</small></button>
+        <button data-kind="dtm">DTM carrier<small>one RF channel</small></button>
+      </div>
+      <div class="dtm-only"><div class="lbl"><span>RF channel</span><b class="v-bfreq"></b></div><div class="grid g10 bchans">${bchs}</div></div>
+      <div class="adv-only"><div class="lbl"><span>Advertising channels</span></div>
+        <div class="grid g3 advchans">
+          <div class="chan" data-adv="37">37<small>2402 MHz</small></div>
+          <div class="chan" data-adv="38">38<small>2426 MHz</small></div>
+          <div class="chan" data-adv="39">39<small>2480 MHz</small></div>
+        </div></div>
+      <div class="two">
+        <div class="notadv"><div class="lbl"><span>PHY</span></div>
+          <select data-k="bphy"><option value="1m">LE 1M</option><option value="2m">LE 2M</option>
+          <option value="s8">Coded S=8 (125 kb/s)</option><option value="s2">Coded S=2 (500 kb/s)</option></select></div>
+        <div><div class="lbl"><span>TX power</span></div>
+          <select data-k="bpwr" data-num>${BLE_PWR.filter(p => p >= pmin).map(p => `<option value="${p}">${p} dBm</option>`).join("")}</select></div>
+        <div class="adv-only"><div class="lbl"><span>Interval (ms)</span></div>
+          <input type="number" min="20" max="10240" step="1" data-k="itvl" data-num></div>
+        <div class="dtm-only"><div class="lbl"><span>Payload pattern</span></div>
+          <select data-k="pat">${PATS.map(p => `<option>${p}</option>`).join("")}</select></div>
+        <div class="notadv"><div class="lbl"><span class="v-lenlbl">Length (bytes)</span></div>
+          <input type="number" min="0" max="255" step="1" data-k="len" data-num></div>
+      </div>
+    </div>
+    <div class="duty-blk"><div class="lbl"><span>Duty cycle (100 ms window)</span><b class="v-duty"></b></div>
+      <div class="slider"><input type="range" min="0" max="100" step="5" data-k="duty" data-num></div></div>
+  </div>
+  <div class="job">
+    <div class="jobrow">
+      <div><div class="lbl"><span>Transmit for (s)</span></div><input type="number" class="secs" min="0.1" max="3600" step="0.1" value="10"></div>
+      <div><div class="lbl"><span>Start in (s)</span></div><input type="number" class="delay" min="0" max="3600" step="0.5" value="0"></div>
+      <button class="btn primary go">▶ Transmit</button>
+    </div>
+    <div class="hint v-plan"></div>
+    <div class="err"></div>
+  </div>
+  <div class="stats">
+    <div><span class="k">last job</span><span class="v v-last">—</span></div>
+    <div><span class="k">frames sent</span><span class="v v-frames">—</span></div>
+    <div><span class="k">control network</span><span class="v v-net">—</span></div>
+    <div><span class="k">link</span><span class="v v-link">—</span></div>
+    <div><span class="k">firmware</span><span class="v v-fw">—</span></div>
+    <div><span class="k">uptime</span><span class="v v-up">—</span></div>
+  </div>
+  <div class="foot">
+    <button class="btn small ota" title="Push the last firmware build to this board over the air">Update firmware</button>
+    <span class="note v-ota"></span>
+    <button class="btn small forget" title="Remove this board from the list">Forget</button>
+  </div>`;
+}
+
+function makeCard(dev) {
+  const el = document.createElement("div");
+  el.className = "card";
+  el.innerHTML = cardHtml(dev);
+  const c = {el, draft: fromStatus(dev.st), dirty: false, dev, busy: false};
+  const edit = (k, v) => { c.draft[k] = v; c.dirty = true; syncControls(c); };
+
+  el.addEventListener("click", e => {
+    const t = e.target.closest("[data-mode],[data-kind],[data-ch],[data-bch],[data-adv]");
+    if (!t || !el.contains(t)) return;
+    const d = t.dataset;
+    if (d.mode) edit("mode", d.mode);
+    else if (d.kind) edit("ble", d.kind);
+    else if (d.ch) edit("ch", +d.ch);
+    else if (d.bch !== undefined) edit("bch", +d.bch);
+    else if (d.adv) {
+      const set = new Set(c.draft.advch.split(","));
+      set.has(d.adv) ? set.delete(d.adv) : set.add(d.adv);
+      if (set.size) edit("advch", [...set].sort().join(","));
+    }
+  });
+  el.querySelectorAll("[data-k]").forEach(inp => inp.addEventListener("input", () =>
+    edit(inp.dataset.k, "num" in inp.dataset ? +inp.value : inp.value)));
+  el.querySelectorAll(".secs,.delay").forEach(inp => inp.addEventListener("input", () => paint(c)));
+  $(el, ".go").addEventListener("click", () => go(c));
+  $(el, ".forget").addEventListener("click", async () => { await api("/api/forget", {mac: dev.mac}); el.remove(); delete cards[dev.mac]; });
+  $(el, ".swatch").addEventListener("change", e => api("/api/set", {mac: dev.mac, led: e.target.value}));
+  const ota = $(el, ".ota");
+  ota.addEventListener("click", async () => {
+    if (!ota.classList.contains("armed")) {
+      ota.classList.add("armed"); ota.textContent = "Click again to update";
+      setTimeout(() => { ota.classList.remove("armed"); ota.textContent = "Update firmware"; }, 4000);
+      return;
+    }
+    ota.classList.remove("armed"); ota.textContent = "Update firmware";
+    const r = await api("/api/ota", {mac: dev.mac});
+    if (!r.ok) showErr(c, r.error);
+  });
+  syncControls(c);
+  return c;
+}
+
+function syncControls(c) {
+  const el = c.el, d = c.draft;
+  el.dataset.mode = d.mode; el.dataset.kind = d.ble;
+  el.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("sel", b.dataset.mode === d.mode));
+  el.querySelectorAll("[data-kind]").forEach(b => b.classList.toggle("sel", b.dataset.kind === d.ble));
+  el.querySelectorAll("[data-ch]").forEach(b => b.classList.toggle("sel", +b.dataset.ch === d.ch));
+  el.querySelectorAll("[data-bch]").forEach(b => b.classList.toggle("sel", +b.dataset.bch === d.bch));
+  const adv = d.advch.split(",");
+  el.querySelectorAll("[data-adv]").forEach(b => b.classList.toggle("sel", adv.includes(b.dataset.adv)));
+  el.querySelectorAll("[data-k]").forEach(inp => {
+    if (document.activeElement !== inp) inp.value = d[inp.dataset.k];
+  });
+  $(el, ".v-wfreq").textContent = wifiFreq(d.ch) + " MHz" + (d.ch > 11 ? " · region-restricted" : "");
+  $(el, ".v-bfreq").textContent = (2402 + 2 * d.bch) + " MHz";
+  $(el, ".v-pwr").textContent = d.pwr + " dBm";
+  $(el, ".v-duty").textContent = d.duty + " %";
+  $(el, ".v-lenlbl").textContent = d.ble === "dtm" ? "Payload (bytes)" : "Adv data (bytes)";
+  paint(c);
+}
+
+function describe(d) {
+  if (d.mode === "wifi") return `WiFi beacons on ch ${d.ch} (${wifiFreq(d.ch)} MHz), ${d.rate}, ${d.pwr} dBm, ${d.duty} % duty`;
+  if (d.ble === "dtm") return `BLE DTM carrier on RF ch ${d.bch} (${2402 + 2 * d.bch} MHz), ${d.bphy}, ${d.pat}, ${d.bpwr} dBm, ${d.duty} % duty`;
+  if (d.ble === "ext") return `BLE extended advertising, ${d.bphy}, on ${d.advch}, every ${d.itvl} ms, ${d.bpwr} dBm`;
+  return `BLE legacy advertising on ${d.advch}, every ${d.itvl} ms, ${d.bpwr} dBm`;
+}
+
+function showErr(c, msg) { $(c.el, ".err").textContent = msg || ""; }
+
+async function go(c) {
+  const el = c.el, dev = c.dev, d = c.draft;
+  if (dev.state === "pending") {                      // the button is "Cancel" now
+    const r = await api("/api/stop", {mac: dev.mac});
+    showErr(c, r.ok ? "" : (r.error || "could not cancel"));
+    return refresh();
+  }
+  const secs = parseFloat($(el, ".secs").value), delay = parseFloat($(el, ".delay").value) || 0;
+  if (!(secs >= 0.1 && secs <= 3600)) return showErr(c, "Duration must be between 0.1 and 3600 s.");
+  if (!(delay >= 0 && delay <= 3600)) return showErr(c, "Start delay must be between 0 and 3600 s.");
+  const body = d.mode === "wifi"
+    ? {mode: "wifi", ch: d.ch, rate: d.rate, pwr: d.pwr, duty: d.duty}
+    : {mode: "ble", ble: d.ble, bphy: d.bphy, bch: d.bch, advch: d.advch, itvl: d.itvl,
+       bpwr: d.bpwr, pat: d.pat, len: d.len, duty: d.duty};
+  c.busy = true; paint(c);
+  let r;
+  try { r = await api("/api/set", {mac: dev.mac, ...body, secs, delay}); }
+  catch (e) { r = {ok: false, error: "dashboard server unreachable"}; }
+  c.busy = false;
+  if (r.ok) { c.dirty = false; showErr(c, ""); } else showErr(c, r.error || "command refused");
+  refresh();
+}
+
+function paint(c) {
+  const el = c.el, dev = c.dev, st = dev.st, state = dev.state;
+  const now = Date.now() / 1000 + skew;
+  el.dataset.state = state;
+  $(el, ".id").textContent = "shitltx-" + dev.mac.replace(/:/g, "").slice(-4) + "  ·  " + (st.chip || "?").replace("esp32", "ESP32-").toUpperCase();
+  $(el, ".sub").textContent = dev.mac + "  ·  " + dev.ip;
+  $(el, ".badge").textContent = {online: "online", pending: "armed", transmitting: "on air",
+    rejoining: "rejoining", updating: "updating", offline: "offline"}[state] || state;
+  const sw = $(el, ".swatch"), led = st.led || "off";
+  if (document.activeElement !== sw) sw.value = led[0] === "#" ? led : (NAMED[led] || "#000000");
+
+  const bar = $(el, ".bar i"), pmsg = $(el, ".pmsg"), pleft = $(el, ".pleft");
+  if (state === "pending") {
+    const left = Math.max(0, dev.job_from - now);
+    pmsg.textContent = "Armed — still on the network"; pleft.textContent = "starts in " + fmtS(left) + " s";
+    bar.style.width = "0%";
+  } else if (state === "transmitting") {
+    const total = Math.max(0.1, dev.job_until - dev.job_from), left = Math.max(0, dev.job_until - now);
+    pmsg.textContent = "On air — off the network until the timer ends"; pleft.textContent = fmtS(left) + " s left";
+    bar.style.width = (100 * (1 - left / total)).toFixed(1) + "%";
+  } else if (state === "rejoining") {
+    pmsg.textContent = "Transmission finished — rejoining the network"; pleft.textContent = "";
+    bar.style.width = "100%";
+  } else if (state === "updating") {
+    pmsg.textContent = dev.ota === "uploading" ? "Writing new firmware…" : "Rebooting into the new firmware…";
+    pleft.textContent = ""; bar.style.width = dev.ota === "uploading" ? "40%" : "85%";
+  }
+
+  const goBtn = $(el, ".go");
+  goBtn.textContent = state === "pending" ? "✕ Cancel" : "▶ Transmit";
+  goBtn.className = "btn go " + (state === "pending" ? "danger" : "primary");
+  goBtn.disabled = c.busy || !(state === "online" || state === "pending");
+  const secs = parseFloat($(el, ".secs").value) || 0, delay = parseFloat($(el, ".delay").value) || 0;
+  $(el, ".v-plan").textContent = state === "transmitting"
+    ? "The board cannot be reached over the air while it transmits. To abort early: `stop` on its USB serial console, or power-cycle it."
+    : state === "offline" ? "Board is not answering at " + dev.ip + " (last heard " + (dev.age > 86400 ? "long ago" : fmtS(dev.age) + " s ago") + ")."
+    : describe(c.draft) + " — for " + secs + " s" + (delay > 0 ? ", starting in " + delay + " s" : "") + ". The board leaves the network for that time and rejoins afterwards.";
+
+  const last = st.last && st.last !== "none"
+    ? `${st.last} · ${st.last_mode} · ${(st.last_ms / 1000).toFixed(2)} s` : "—";
+  $(el, ".v-last").textContent = last;
+  $(el, ".v-frames").textContent = st.last_mode === "wifi" && st.last !== "none"
+    ? (+st.last_frames).toLocaleString() + (st.last_ms > 0 ? " (" + Math.round(st.last_frames * 1000 / st.last_ms) + "/s)" : "") : "—";
+  $(el, ".v-net").textContent = (st.ap || "—") + (+st.apch ? " · ch " + st.apch : "");
+  $(el, ".v-link").textContent = state === "online" || state === "pending" ? st.rssi + " dBm" : "—";
+  $(el, ".v-fw").textContent = "v" + (st.ver || "?") + " · " + (st.part || "?");
+  const up = +st.up || 0;
+  $(el, ".v-up").textContent = up >= 3600 ? (up / 3600).toFixed(1) + " h" : up >= 60 ? Math.floor(up / 60) + " min" : up + " s";
+
+  const fw = firmware[st.chip], ota = $(el, ".ota"), note = $(el, ".v-ota");
+  ota.disabled = !fw || state !== "online";
+  note.className = "note v-ota" + (dev.ota === "done" ? " ok" : dev.ota === "failed" ? " bad" : "");
+  note.textContent = dev.ota ? dev.ota_msg
+    : fw ? "build v" + fw.ver + " · " + (fw.size / 1048576).toFixed(2) + " MB · " + new Date(fw.mtime * 1000).toLocaleString([], {dateStyle: "short", timeStyle: "short"})
+    : "no firmware build found";
+  note.title = note.textContent;
+}
+
+async function refresh() {
+  let data;
+  try { data = await api("/api/devices"); }
+  catch (e) {
+    const b = document.getElementById("banner");
+    b.style.display = "block"; b.textContent = "Dashboard server is not responding.";
+    return;
+  }
+  document.getElementById("banner").style.display = "none";
+  skew = data.now - Date.now() / 1000;
+  firmware = data.firmware;
+  const f = firmware.esp32c6 || Object.values(firmware)[0];
+  document.getElementById("fwbuild").textContent = f ? "v" + f.ver : "none";
+  document.getElementById("devcount").textContent = data.devices.length;
+  const root = document.getElementById("cards");
+  const empty = document.getElementById("empty");
+  if (empty) empty.style.display = data.devices.length ? "none" : "";
+  for (const dev of data.devices) {
+    let c = cards[dev.mac];
+    if (!c) {
+      if (!dev.st.mac) continue;                       // remembered address, not heard from yet
+      c = cards[dev.mac] = makeCard(dev);
+      root.appendChild(c.el);
+    }
+    c.dev = dev;
+    if (!c.dirty && dev.state === "online" && !c.busy) { c.draft = fromStatus(dev.st); syncControls(c); }
+    else paint(c);
+  }
+}
+
+async function addIp() {
+  const inp = document.getElementById("addip"), ip = inp.value.trim();
+  if (!ip) return;
+  const r = await api("/api/add", {ip});
+  if (r.ok) inp.value = ""; else inp.setCustomValidity(r.error), inp.reportValidity();
+  setTimeout(refresh, 800);
+}
+document.getElementById("addip").addEventListener("keydown", e => { e.target.setCustomValidity(""); if (e.key === "Enter") addIp(); });
+
+refresh();
+setInterval(refresh, 1000);
+setInterval(() => Object.values(cards).forEach(c => {
+  if (["pending", "transmitting"].includes(c.dev.state)) paint(c);
+}), 200);
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+firmware/build/
+firmware/build-*/
+firmware/sdkconfig
+firmware/sdkconfig.esp32*
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock
+firmware/.cache/
+.DS_Store
+__pycache__/
+# dashboard: last known device addresses (runtime state)
+dashboard/devices.json

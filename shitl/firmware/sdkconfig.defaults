@@ -1,0 +1,39 @@
+# Target is not pinned here; tools/flash.sh reads the chip type off the port.
+
+# Console on UART0: the bench C6 boards reach the host through a WCH CH343
+# USB-UART bridge. For a board on its native USB-Serial-JTAG jack, replace this
+# with CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y (the REPL code follows the choice).
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# 1 kHz tick: the injector's once-per-window yield is 1 ms, so duty=100 is ~99 %.
+CONFIG_FREERTOS_HZ=1000
+
+# Raw injection is bursty; give it more TX buffers.
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
+
+# The injection loop is deliberately hot.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+
+# Bluetooth LE, broadcaster only: legacy + extended advertising (2M, Coded via the
+# v2 parameters command) and Direct Test Mode. WiFi and BLE are both initialised
+# in one boot (software coexistence); a BLE job stops the WiFi radio while it runs.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_EXT_ADV=y
+CONFIG_BT_NIMBLE_EXT_ADV_V2=y
+CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES=1
+CONFIG_BT_NIMBLE_EXT_ADV_MAX_SIZE=255
+CONFIG_BT_NIMBLE_DTM_MODE_TEST=y
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+
+# Over-the-air firmware update: two 1.9 MB app slots (partitions.csv) on 4 MB
+# flash. A freshly updated image must rejoin the control network within 90 s or
+# the bootloader rolls back to the previous one (net.c).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
